@@ -1,0 +1,15 @@
+{
+  "name": "hxb-neptunzinho",
+  "version": "1.0.0",
+  "description": "Sala headless lokal de HaxBall con comandos de administración y el bot profesional NeptunZinho.",
+  "main": "sala.js",
+  "scripts": {
+    "start": "node sala.js",
+    "test": "node test/sandbox_tests.js"
+  },
+  "keywords": ["haxball", "headless", "bot", "futsal"],
+  "license": "MIT",
+  "dependencies": {
+    "node-haxball": "^2.3.1"
+  }
+}

@@ -1,0 +1,6 @@
+# Token headless de HaxBall
+# 1) Entra a https://www.haxball.com/headlesstoken y copia tu token (empieza por "thr1").
+# 2) Pega el token aquí debajo, en una línea propia (sin comillas).
+#    O bien define la variable de entorno HAXBALL_TOKEN.
+
+thr1.AAAAAGqiBMxnd6Q1L0F30g.hoSfofRku2Y
