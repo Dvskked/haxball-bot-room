@@ -61,12 +61,12 @@ const CONFIG = {
   friction: 0.99,                      // decaimiento de velocidad del balon
   predSteps: 40,                       // frames a futuro para interceptar
   maxSpeed: 26,                        // velocidad maxima estimada (px/tick)
-  brakeAcc: 3.2,                       // deceleracion estimada (px/tick^2)
-  reachSpeed: 15,                      // velocidad media de desplazamiento
-  reachEps: 30,                        // margen para "alcanzo el punto"
+  brakeAcc: 5,                         // deceleracion del crucero (px/tick^2)
+  reachSpeed: 13,                      // velocidad media de desplazamiento
+  reachEps: 26,                        // margen para "alcanzo el punto"
   // ---- Disparo / dribling ----
   kickRange: 50,
-  kickCooldown: 7,                     // ticks entre patadas lejos del arco
+  kickCooldown: 6,                     // ticks entre patadas lejos del arco
   quickCooldown: 3,                    // ticks entre patadas cerca del arco
   kickLock: 90,                        // no patear en el arranque/kickoff
   alignRadians: 0.75,                  // tolerancia de alineacion al tirar
@@ -101,7 +101,7 @@ const Bot = {
   team: CONFIG.botTeam,
   aimY: 0,
   // velocidad estimada del bot (derivada de posiciones)
-  pvX: null, pvY: null, Vx: 0, Vy: 0, braking: false,
+  pvX: null, pvY: null, Vx: 0, Vy: 0,
   learn: {
     goalsFor: 0,
     goalsAgainst: 0,
@@ -181,37 +181,36 @@ function playerDisc(player) {
   return player.disc.ext || player.disc;
 }
 function trackMyMotion(x, y) {
-  const CAP = 34, SMOOTH = 0.45;
+  const CAP = CONFIG.maxSpeed * 1.3, SMOOTH = 0.35;
   if (Bot.pvX != null) {
-    const vx = clamp(x - Bot.pvX, -CAP, CAP);
-    const vy = clamp(y - Bot.pvY, -CAP, CAP);
-    Bot.Vx = Bot.Vx * SMOOTH + vx * (1 - SMOOTH);
-    Bot.Vy = Bot.Vy * SMOOTH + vy * (1 - SMOOTH);
+    const dx = x - Bot.pvX, dy = y - Bot.pvY;
+    const jump = Math.abs(dx) + Math.abs(dy);
+    if (jump > CAP * 2.5) {            // respawn/teleport -> no muestrear
+      Bot.Vx = 0; Bot.Vy = 0;
+    } else {
+      Bot.Vx = Bot.Vx * SMOOTH + clamp(dx, -CAP, CAP) * (1 - SMOOTH);
+      Bot.Vy = Bot.Vy * SMOOTH + clamp(dy, -CAP, CAP) * (1 - SMOOTH);
+    }
   }
   Bot.pvX = x; Bot.pvY = y;
 }
 
 /* ============================================================
-   CONTROL DE MOVIMIENTO con FRENO.
-   El jugador de haxball corre siempre a velocidad maxima en
-   8 direcciones; para no sobrepasar el objetivo se frena
-   aplicando input en sentido contrario cuando la distancia de
-   detencion es mayor que la que queda hasta el punto.
+   CONTROL DE MOVIMIENTO (sin invertir nunca).
+   Si va demasiado rápido y está cerca del objetivo, SOLTAR las
+   teclas (coast) para que la fricción lo frene; jamás se invierte
+   el input (eso mandaba al bot para atrás / fuera del mapa).
    ============================================================ */
 function moveControl(meX, meY, Vx, Vy, tx, ty) {
   const dx = tx - meX, dy = ty - meY;
   const d = Math.sqrt(dx * dx + dy * dy);
-  if (d < 5) { Bot.braking = false; return { dx: 0, dy: 0 }; }
+  if (d < 5) return { dx: 0, dy: 0 };
   const ux = dx / d, uy = dy / d;
   const spd = Vx * ux + Vy * uy;                       // componente de avance
   const stopD = (spd * spd) / (2 * CONFIG.brakeAcc) + 10;
 
-  if (Bot.braking) {
-    if (spd < 2.5 || stopD < d - 18) { Bot.braking = false; }
-    else return { dx: -ux, dy: -uy };                  // frenar
-  } else if (spd > 5.5 && stopD > d + 14) {
-    Bot.braking = true;
-    return { dx: -ux, dy: -uy };
+  if (spd > 4 && stopD > d) {
+    return { dx: 0, dy: 0 };                           // crucero: soltar teclas
   }
   return { dx: ux, dy: uy };
 }
@@ -249,8 +248,9 @@ function keeperTarget(ball, pts, ownGoalX) {
   baseY = clamp(baseY + Bot.learn.saveBias * 26, -(half - 6), half - 6);
   let f = 0.30;
   if (Math.abs(ownGoalX - ball.x) < 260) f = 0.18;     // peligro inminente -> linea
-  const tx = clamp(ownGoalX + (ball.x - ownGoalX) * f, ownGoalX + s * 22, ownGoalX + s * 300);
-  const ty = ball.y * 0.3 + baseY * 0.7;
+  // El portero NUNCA atraviesa la linea de gol: se mantiene 20..320 px hacia el campo
+  const tx = clamp(ownGoalX + (ball.x - ownGoalX) * f, ownGoalX + s * 20, ownGoalX + s * 320);
+  const ty = clamp(ball.y * 0.3 + baseY * 0.7, -(half + 40), (half + 40));
   return { x: tx, y: ty };
 }
 
@@ -301,6 +301,14 @@ function decayLearning() {
    ENVÍO DE INPUT (node-haxball). Desync = solo enviar al cambiar.
    ============================================================ */
 function sendInput(room, dirX, dirY, wantKick) {
+  if (process.env.NEPT_DEBUG) {
+    const dbg = (dirX < 0 ? 'L' : dirX > 0 ? 'R' : '-') + (dirY < 0 ? 'U' : dirY > 0 ? 'D' : '-');
+    let tinfo = '';
+    if (Bot.dbgT) tinfo = ' tgt(' + Bot.dbgT.x.toFixed(0) + ',' + Bot.dbgT.y.toFixed(0) + ') near=' + Bot.dbgT.near +
+      ' me(' + Bot.dbgT.mx.toFixed(0) + ',' + Bot.dbgT.my.toFixed(0) + ') V(' + Bot.dbgT.vx.toFixed(1) + ',' + Bot.dbgT.vy.toFixed(1) + ')' +
+      ' ball(' + Bot.dbgT.bx.toFixed(0) + ',' + Bot.dbgT.by.toFixed(0) + ') g(' + Bot.dbgT.gx.toFixed(0) + ',' + Bot.dbgT.gy.toFixed(0) + ') dbp=' + Bot.dbgT.dbp.toFixed(0);
+    console.log('[d] t' + Bot.tick + ' ' + Bot.debugMode + ' keys=' + dbg + ' kick=' + (wantKick ? 1 : 0) + tinfo);
+  }
   let desired = Utils.keyState(dirX, dirY, !!wantKick);
   const me = room.getPlayer(CONFIG.botId);
   const isKicking = !!(me && me.isKicking);
@@ -352,14 +360,13 @@ function tickUpdate(room) {
   const ball = readBall(room);
   let wantKick = false;
 
-  /* ---- SIN PARTIDO: formacion ----
-     Mientras el balon no existe (espectadores/kickoff aun sin reset),
-     el bot ocupa su posicion inicial algo adelantada. */
+  /* ---- SIN PARTIDO: espera en el CENTRO del campo ----
+     En el kickoff el balon reaparece en el centro; estando ahi
+     gana la posesion al inicio. (Antes se retiraba a su arco y
+     parecia que "se iba para atras".) */
   if (!ball) {
-    const ownGoalX = -enemyGoalX(Bot.team);
-    const gx = enemyGoalX(Bot.team);
-    const fx = ownGoalX + (gx - ownGoalX) * 0.3;
-    const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, fx, 0);
+    Bot.debugMode = 'F';
+    const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, 0, 0);
     const k = toKeys(m.dx, m.dy);
     sendInput(room, k.dx, k.dy, false);
     return;
@@ -396,6 +403,7 @@ function tickUpdate(room) {
 
   /* ================= PORTERO ================= */
   if (inDanger) {
+    Bot.debugMode = 'K';
     const kp = keeperTarget(ball, pts, ownGoalX);
     const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, kp.x, kp.y);
     const k = toKeys(m.dx, m.dy);
@@ -406,6 +414,7 @@ function tickUpdate(room) {
 
   /* ================= SOMBRA (el rival lleva el balon) ================= */
   if (ebp < dbp - 15) {
+    Bot.debugMode = 'S';
     const sp = shadowTarget(ball, ownGoalX);
     const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, sp.x, sp.y);
     const k = toKeys(m.dx, m.dy);
@@ -420,6 +429,7 @@ function tickUpdate(room) {
   const gdx = gx - bx, gdy = gy - by;
   const gl = len(gdx, gdy) || 1;
   const ugx = gdx / gl, ugy = gdy / gl;
+  Bot.debugMode = 'A';
 
   if (nearBall) {
     /* DRIBLING: colocarse ligeramente "detras" del balon respecto a la
@@ -427,12 +437,17 @@ function tickUpdate(room) {
     tx = bx - ugx * (BALL_R + 10);
     ty = by - ugy * (BALL_R + 10);
 
-    if (kickReady()) {
-      const aMeB = Math.atan2(by - meY, bx - meX);
-      const aBC = Math.atan2(ugy, ugx);
-      const diff = Math.abs(normAngle(aMeB - aBC));
-      const nearGoal = Math.abs(bx - gx) < CONFIG.finishRange;
-      if (diff < (nearGoal ? CONFIG.alignRadians : CONFIG.dribbleTol)) {
+    const aMeB = Math.atan2(by - meY, bx - meX);
+    const aBC = Math.atan2(ugy, ugx);
+    const diff = Math.abs(normAngle(aMeB - aBC));
+    const approach = Bot.Vx * ugx + Bot.Vy * ugy;      // velocidad hacia la esquina
+    const nearGoal = Math.abs(bx - gx) < CONFIG.finishRange;
+
+    if (kickReady() && dbp <= CONFIG.touchRange + 6) {
+      // ROCKET: viniendo con carrera y alineado -> golpe fuerte;
+      // en conduccion lenta -> golpecito de control.
+      const tol = nearGoal ? CONFIG.alignRadians : (approach > 12 ? CONFIG.alignRadians : CONFIG.dribbleTol);
+      if (diff < tol) {
         wantKick = true;
         Bot.lastKickTick = Bot.tick;
       }
@@ -449,6 +464,7 @@ function tickUpdate(room) {
   }
   tx = clamp(tx, -FIELD_W + MARGIN, FIELD_W - MARGIN);
   ty = clamp(ty, -FIELD_H + MARGIN, FIELD_H - MARGIN);
+  if (process.env.NEPT_DEBUG) Bot.dbgT = { x: tx, y: ty, near: nearBall, dbp: dbp, mx: meX, my: meY, vx: Bot.Vx, vy: Bot.Vy, bx: bx, by: by, gx: gx, gy: gy };
 
   const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, tx, ty);
   const k = toKeys(m.dx, m.dy);
