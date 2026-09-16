@@ -1,97 +1,145 @@
-# Bot IA Competitivo para HaxBall Headless
+# Neptunzinho — Bot IA Profesional para HaxBall Headless
 
-Bot de fútbol con Inteligencia Artificial avanzada, escrito en **JavaScript Vanilla (nativo)**, diseñado para ejecutarse **exclusivamente** en el entorno Headless de [haxball.com/headless](https://haxball.com/headless).
+Bot de fútbol 1v1 con Inteligencia Artificial y **aprendizaje adaptativo**, escrito en **JavaScript Vanilla** (sin librerías, sin Node.js), para ejecutarse en la consola de un servidor headless de HaxBall.
 
-- Sin Node.js
-- Sin librerías de terceros (no usa `haxball.js`)
-- Sin servidores externos
-- Solo la API nativa `HBInit()` del navegador
+> [!IMPORTANTE]
+> ## Por qué el bot "no se mueve" en haxball.com/headless
+>
+> La **API oficial** de HaxBall Headless **NO incluye ningún método para mover jugadores**:
+> no existe `setPlayerInputs`, `setPlayerInputControls` ni equivalente. Está confirmado en la
+> documentación oficial y en [haxball/haxball-issues#1467](https://github.com/haxball/haxball-issues/issues/1467).
+>
+> Resultado: en la página oficial **el bot nunca va a moverse** — eso no es un bug del script.
+> Para que un jugador sea controlado por IA hace falta un host con la API **parcheada**
+> (un `game-min.js` modificado que exponga el control de input).
+>
+> Este script **detecta automáticamente** qué API expone la página que tengas abierta:
+> - Si hay control de input → **mueve al bot con toda la IA**.
+> - Si no → imprime una advertencia en rojo en la consola y funciona como **gestor de sala**
+>   (equipos, límites 1v1, anuncios, comandos).
+
+---
+
+## Cómo se mueve el bot (hosts compatibles)
+
+El script usa el método disponible en este orden: `setPlayerInputs({dx,dy,kick}, id)` (moderno) o
+`setPlayerInputControls(id, {up,down,left,right,kick})` (fork antiguo).
+
+Para un host **que sí puede mover bots**, opciones de la comunidad:
+
+| Host | Qué es | Nota |
+|---|---|---|
+| [node-haxball (wxyz-abcd)](https://github.com/wxyz-abcd/node-haxball) | Framework potente (browser/Node) con control real de input (`playerInput`) | Su ejemplo web usa su propia página headless parcheada |
+| haxroomie / haxbolt / haxball-room-host | Gestores de sala para VPS que ejecutan headless parcheado | Muy usados por la comunidad de bots |
+| Fork propio con `game-min.js` modificado | Compilas/parcheas tú la API | Se rompe con cada update grande de Basro |
+
+Si tu página expone `room.setPlayerInputs` (o `setPlayerInputControls`), **este script lo detecta solo y el bot juega**.
 
 ---
 
 ## Cómo usar
 
-1. Abre en tu navegador: [https://haxball.com/headless](https://haxball.com/headless)
-2. Pulsa `F12` para abrir la consola del navegador.
-3. Copia el contenido de [`haxball-bot-ia.js`](./haxball-bot-ia.js) y pégalo en la consola.
-4. Pulsa `Enter`. La sala se crea y el bot empieza a jugar automáticamente.
+1. Abre tu **host headless** (el oficial para gestionar la sala, o el parcheado para ver al bot moverse).
+2. Pulsa `F12` → consola.
+3. Copia el contenido de [`haxball-bot-ia.js`](./haxball-bot-ia.js) y pégalo → `Enter`.
+4. Opcional: edita arriba del archivo `CFG.playerName` (por defecto **"Neptunzinho"**).
 
-> Para publicar la sala en la lista de HaxBall necesitas un `token` de sala pública
-> (obtenlo en https://www.haxball.com/headlesstoken). Añádelo en `ROOM_CONFIG.token`.
-> Con `token: ''` la sala solo funciona con invitación directa por link.
+### El bot es el host de la sala (no necesitás renombrar a nadie)
+La sala se crea con `playerName: "Neptunzinho"` y `noPlayer: false`, así el **host player**
+ya nace con ese nombre y **este script lo enlaza automáticamente** como bot. La API de haxball
+no permite renombrar jugadores externos, por eso el bot se configura por nombre en `playerName`.
 
 ---
 
 ## Características
 
-### Inicialización de la sala
-- Se crea con `HBInit({ ... })` usando únicamente la API nativa.
-- `noPlayer: false`: la entidad de la sala controla y mueve un jugador físico real dentro del campo (el Bot).
-- Gestión de eventos básica y robusta:
-  - `onPlayerJoin`: asignación de bot, admins y balanceo de equipos.
-  - `onPlayerLeave`: reasignación del avatar del bot y rebalanceo.
-  - `onTeamVictory`: auto-reset de la partida (`stopGame` → `startGame`).
+### Sala
+- `HBInit` nativo con sala 1v1: `playerName`, `maxPlayers: 4`, `public: false`.
+- **Límites 1v1**: `scoreLimit` (3 goles) y `timeLimit` (0 = sin tiempo).
+- Auto-arranque: cuando hay 1 jugador por equipo se lanza el partido solo.
+- Auto-balanceo de equipos, todos admin, avatar ⚡ para el bot.
+- Reconexión: si el bot se va, se reasigna en `onPlayerLeave` y con chequeos periódicos.
 
-### IA avanzada en `onGameTick` (60 FPS)
-- **Predicción de trayectoria de la pelota**: no persigue la posición actual de la bola. Simula paso a paso su posición futura usando `ball.vx` / `ball.vy`, el vector de **fricción** (`ballFriction = 0.5`) aplicado en tiempo real, y los **rebotes contra las paredes** del campo (800x400).
-- **Posicionamiento táctico**:
-  - Modo defensivo: se intercala exactamente sobre la línea entre la pelota y su propia portería para bloquear tiros (con esquive lateral dinámico).
-  - Modo ofensivo: busca el ángulo de aproximación alineado *detrás* de la pelota respecto de la portería rival, listo para empujarla al gol.
-- **Control de disparo (`kick: true` via `room.setPlayerInputs`)**:
-  - Solo patea dentro del rango óptimo (`kickRange`) y cuando su alineación relativa pelota→arco supera el umbral angular.
-  - Tolerancia más estricta en disparos lejanos (tiros de precisión), más laxa en el área (toques de control).
-  - **Tiros con rebote**: un planificador de tiro evalúa trayectorias directas y trayectorias "bank shot" contra los bordes del mapa (paredes superior/inferior), validando por simulación si la bola entra realmente en la portería rival antes de elegir el objetivo.
-- **Despejes peligrosos**: cuando la bola está en el área propia (`dangerClear`), despeja hacia la mitad rival teniendo en cuenta la banda por la que escapa.
-- Control de físicas con cooldown de patada para evitar "stuttering" del bot.
+### IA (60 FPS, `onGameTick`)
+- **Predicción física**: lee la velocidad real del balón (vía `getDiscProperties(0)` o por
+  dif. de ticks si la API no la da), integra posición+velocidad con fricción **0.99** y rebotes
+  en los muros → el bot intercepta la trayectoria, no persigue la bola.
+- **Máquina de estados**:
+  - Defensa: se para sobre la recta portería-propia → balón para bloquear.
+  - Campo propio: misma línea, más adelantado.
+  - Ataque: corre a la posición futura del balón y se coloca "detrás" para empujarlo.
+- **Disparo con cooldown**: patea solo alineado (< 0.6 rad a la esquina elegida);
+  cooldown corto cerca del arco (finishing), despeje automático en área propia, y
+  **sprint/dash** cuando está lejos (APIs modernas).
+- **Esquiva al rival** cuando pelea el balón (nudge perpendicular).
 
-### Extras
-- Chat: escribe `!bot` para **activar/desactivar** la IA (útil para jugar tú manualmente).
-- `window.HAXBOT` expone `{ room, cfg, bot }` para depurar desde consola.
-- Todos los jugadores son admin por defecto (`CFG.allAdmins`).
+### Aprendizaje (de verdad)
+- Aprende **qué esquina del arco le convierte más**: cada gol refuerza la esquina del último
+  tiro (`Learn.cornerScore`) y las preferencias decaen lentamente con el tiempo.
+- Se adapta al marcador: si va **perdiendo** hunde la línea defensiva; si va **ganando**,
+  presiona más arriba (`goalDrift`).
 
 ---
+
+## Comandos (chat)
+
+| Comando | Acción |
+|---|---|
+| `!bot` | Rebusca y reasigna al bot por nombre |
+| `!rojo` / `!azul` | Cambia el bot de equipo |
+| `!ia` | Muestra estadísticas y esquinas aprendidas |
+| `/stadium <nombre>` | Cambia de estadio (admin) |
 
 ## Tabla de configuración (`CFG`)
 
-| Clave | Valor | Descripción |
+| Clave | Defecto | Descripción |
 |---|---|---|
-| `botEnabled` | `true` | Activa/desactiva la IA del bot |
-| `allAdmins` | `true` | Otorga admin a todos los que entran |
-| `ballLookAhead` | `2.0` | Segundos de predicción de trayectoria |
-| `kickRange` | `34` | Distancia máxima para poder patear |
-| `kickCooldown` | `0.08` | Segundos entre patadas |
-| `alignCosClose` | `0.92` | Umbral de alineación en juego corto |
-| `alignCosFar` | `0.97` | Umbral de alineación en disparo lejano |
-| `stickDist` | `24` | Distancia a la que el bot se coloca "detrás" de la bola |
-| `longDist` | `140` | Distancia a partir de la cual se persigue el punto predicho |
-| `dangerClear` | `120` | Radio de peligro sobre la propia portería |
-| `blockDist` | `85` | Distancia de la línea de bloqueo respecto a la portería |
-| `goalHalf` | `6` | Semialto de la boca de gol (para simular tiros) |
-| `ballSpeed` | `0.3` | Impulso simulado de la patada (`ballKickSpeed`) |
-| `restartDelay` | `4000` | ms hasta `stopGame` tras un gol |
-| `restartGap` | `1000` | ms entre `stopGame` y `startGame` |
+| `playerName` | `Neptunzinho` | Nombre del bot (host player) |
+| `botAvatar` | `⚡` | Avatar del bot |
+| `botTeam` | `1` | Equipo inicial (1 Rojo / 2 Azul) |
+| `grabFirst` | `true` | Sin el nombre, controla al primer jugador |
+| `allAdmins` | `true` | Todos admin |
+| `autoBalance` | `true` | Reparte espectadores en equipos |
+| `autoStart` | `true` | Arranca el partido con 1v1 |
+| `autoRestart` | `false` | Reinicia el partido tras la victoria |
+| `stadium` | `Classic` | Estadio inicial (`''` = no tocar) |
+| `scoreLimit` | `3` | Goles para ganar |
+| `timeLimit` | `0` | Minutos de límite (0 = ilimitado) |
+| `friction` | `0.99` | Fricción del balón por tick |
+| `predSteps` | `30` | Frames de predicción (~0.5 s) |
+| `kickRange` | `50` | Rango máximo de patada |
+| `kickCooldown` | `8` | Cooldown de patada (ticks) |
+| `quickCooldown` | `4` | Cooldown cerca del arco (ticks) |
+| `kickLock` | `90` | No patear en el arranque del kickoff |
+| `alignRadians` | `0.6` | Tolerancia de alineación para disparar |
+| `stickDist` | `22` | px "detrás" del balón al atacar |
+| `leadScale` | `0.24` | Anticipación al punto futuro |
+| `blockBase` | `130` | Línea de bloqueo defensivo |
+| `dangerBase` | `470` | Radio de peligro en área propia |
+| `goalHalf` | `180` | Media altura de la portería (Classic) |
+| `avoidDist` | `170` | Rango para esquivar rival |
+| `finishRange` | `420` | Distancia de arranque del modo finisher |
 
 ---
 
-## Cómo funciona la IA (resumen técnico)
+## Archivos
 
-1. **`simulateBall`**: integra la posición futura de la bola en pasos de `1/60s` aplicando `factor = (1 - friction)^dt` y reflejando la velocidad en los bordes del campo.
-2. **Toma de decisión**: si la bola está más cerca de mi portería que de la rival → **defensa**; si no → **ataque**.
-3. **Defensa**:
-   - Bola lejos → posición de bloqueo sobre la bisectriz pelota→portería (`blockPoint`).
-   - Bola en el área → perseguir la bola predicha y despejar (`pickClearAim`).
-4. **Ataque**:
-   - Lejos de la bola → correr al punto predicho con ventaja de llegada (`leadPoint`).
-   - Cerca → colocarse detrás de la bola respecto al arco rival (`behindBall`).
-   - `planShot` busca el mejor objetivo (centro, palos o rebote en pared) validando la trayectoria con `bouncesIntoGoal`.
-5. **Patada**: `wantKick` comprueba rango y alineación `dot(bot→bola, bola→objetivo)` y `room.setPlayerInputs(id, { ..., kick: true })` ejecuta el disparo.
+- `haxball-bot-ia.js` — el script completo (IIFE, listo para pegar en consola).
+- Este `README.md` — documentación.
 
----
+## Solución de problemas
+
+- **"El bot no se mueve"** → mirá la consola: si aparece la advertencia roja de
+  `MOVIMIENTO DEL BOT IMPOSIBLE`, estás en la página oficial (sin parche). Usá un host parcheado.
+- **"`room.setPlayerInputs is not a function`"** → mismo caso: la página no tiene el método.
+  El script ya no crashea por esto: lo detecta y avisa.
+- **Sala que "colapsa"** → el script envuelve `onGameTick` en `try/catch`; ningún error
+  puntual tumba el servidor.
 
 ## Requisitos
 
-- Navegador (Chrome, Firefox, Edge) con acceso a `https://haxball.com/headless`.
-- Conexión estable a los servidores de HaxBall.
+- Navegador (Chrome, Firefox, Edge) con acceso a un host headless de HaxBall.
+- Para ver al bot moverse: host con API parcheada (ver tabla).
 
 ## Licencia
 
