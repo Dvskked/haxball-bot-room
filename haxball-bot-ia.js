@@ -1,239 +1,162 @@
 (function () {
   'use strict';
 
+  /* ============================================================
+     GUARD: debe ejecutarse dentro de https://haxball.com/headless
+     ============================================================ */
   if (typeof HBInit !== 'function') {
     if (typeof console !== 'undefined') {
-      console.error('HBInit no esta definido. Ejecuta el script dentro de la consola del navegador abriendo: https://haxball.com/headless');
+      console.error('HBInit no esta definido. Abre https://haxball.com/headless y pega el script ahi.');
     }
     return;
   }
 
-  var ROOM_CONFIG = {
-    roomName: 'Bot IA Competitivo [Vanilla]',
-    maxPlayers: 8,
+  /* ============================================================
+     CONFIGURACIÓN DE LA SALA
+     ============================================================ */
+  var room = HBInit({
+    roomName: 'Sala Bot Pro | Neptunzinho (1v1 AF)',
+    maxPlayers: 12,
     public: false,
-    noPlayer: false,
-    token: ''
-  };
+    noPlayer: false
+  });
 
-  var room = HBInit(ROOM_CONFIG);
+  if (!room) {
+    console.log('[Neptunzinho] Ya existe una sala activa en esta cuenta. Cierra la otra o usa otro navegador.');
+    return;
+  }
 
+  /* ============================================================
+     CONFIGURACIÓN EDITABLE
+     ============================================================ */
   var CFG = {
-    botEnabled: true,
-    allAdmins: true,
-    ballLookAhead: 2.0,
-    kickRange: 34,
-    kickCooldown: 0.08,
-    alignCosClose: 0.92,
-    alignCosFar: 0.97,
-    stickDist: 24,
-    longDist: 140,
-    dangerClear: 120,
-    blockDist: 85,
-    goalHalf: 6,
-    ballSpeed: 0.3,
-    restartDelay: 4000,
-    restartGap: 1000
+    botName: 'Neptunzinho',     // Jugador que sera controlado por la IA
+    botAvatar: '\u26A1',        // ⚡
+    botTeam: 1,                 // 1 = Rojo | 2 = Azul
+    grabFirst: true,            // Sin bot con el nombre -> controla al primer jugador
+    allAdmins: true,            // Todos los que entren son admin
+    autoBalance: true,          // Reparte automáticamente los espectadores en equipos
+    stadium: '',                // '' = no tocar el estadio (lo pone el admin); o 'Classic', '1v1 AF', etc.
+    // ---- Parámetros de la IA ----
+    friction: 0.99,             // Decaimiento de velocidad del balon por tick
+    predSteps: 30,              // Frames a futuro para interceptar (~0.5 s)
+    kickRange: 48,              // Distancia maxima bot-balon para patear
+    kickCooldown: 8,            // Cooldown en ticks (~133 ms a 60 FPS)
+    kickLock: 90,               // No patear justo tras el kickoff (regla)
+    alignRadians: 0.55,         // Tolerancia de alineacion para disparar
+    stickDist: 22,              // px "detras" del balon al atacar
+    leadScale: 0.30,            // Anticipacion hacia la posicion futura del balon
+    blockDist: 130,             // Distancia de la linea de bloqueo defensivo
+    dangerDist: 470,            // Radio de peligro en area propia
+    goalHalf: 180               // Media altura de la porteria (Classic)
   };
 
-  var P = { W: 800, H: 400, BALL_R: 10, FRICTION: 0.5, DT: 1 / 60 };
+  /* ============================================================
+     CONSTANTES DEL MAPA (Classic ~3760x2080)
+     ============================================================ */
+  var FIELD_W = 1880, FIELD_H = 1040;  // Medias dimensiones
+  var GOAL_X = 1860;                   // Linea de gol
+  var MARGIN = 30;
 
-  var V = {
-    sub: function (a, b) { return { x: a.x - b.x, y: a.y - b.y }; },
-    add: function (a, b) { return { x: a.x + b.x, y: a.y + b.y }; },
-    mul: function (a, s) { return { x: a.x * s, y: a.y * s }; },
-    dist: function (a, b) { return Math.hypot(a.x - b.x, a.y - b.y); },
-    len: function (a) { return Math.hypot(a.x, a.y); },
-    dot: function (a, b) { return a.x * b.x + a.y * b.y; },
-    norm: function (a) { var l = Math.hypot(a.x, a.y); return l > 1e-9 ? { x: a.x / l, y: a.y / l } : { x: 0, y: 0 }; },
-    clamp: function (v, lo, hi) { return Math.min(Math.max(v, lo), hi); },
-    angleDiff: function (a, b) { return Math.acos(V.clamp(V.dot(a, b), -1, 1)); }
-  };
+  /* ============================================================
+     ESTADO GLOBAL
+     ============================================================ */
+  var bot = { playerId: null, team: CFG.botTeam };
+  var tick = 0;
+  var lastKickTick = -1000;
+  var kickLockUntil = 0;
+  var tickError = false;
+  var predX = 0, predY = 0;   // Salida de la prediccion (sin objetos por frame)
 
-  var bot = { playerId: null };
-  var lastKickAt = 0;
+  /* ============================================================
+     DETECCIÓN DE API (importante: versiones viejas no tienen
+     setPlayerInputs; usan setPlayerInputControls(id, {up,down,...}))
+     AQUI estaba el crash: TypeError room.setPlayerInputs is not a function
+     ============================================================ */
+  var API = { power: 'setPlayerInputs', legacyControls: null };
+  if (typeof room.setPlayerInputs !== 'function') {
+    API.power = null;
+    if (typeof room.setPlayerInputControls === 'function') API.legacyControls = 'setPlayerInputControls';
+    else if (typeof room.setPlayerInputControl === 'function') API.legacyControls = 'setPlayerInputControl';
+  }
+  console.log('[Neptunzinho] API detectada:', API.power ? 'moderna (setPlayerInputs)' : 'legacy (' + API.legacyControls + ')');
 
-  function timeNow() { return new Date().getTime() / 1000; }
+  /* ============================================================
+     MATEMÁTICA VECTORIAL (vanilla, sin allocs pesados)
+     ============================================================ */
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function len(x, y) { return Math.sqrt(x * x + y * y); }
 
-  function goalsInfo(selfTeam) {
-    if (selfTeam === 1) return { own: { x: 790, y: 200 }, opp: { x: 10, y: 200 } };
-    return { own: { x: 10, y: 200 }, opp: { x: 790, y: 200 } };
+  function normAngle(a) {           // Angulo normalizado a [-PI, PI]
+    while (a > Math.PI) a -= 2 * Math.PI;
+    while (a < -Math.PI) a += 2 * Math.PI;
+    return a;
   }
 
-  function simulateBall(ball, steps) {
-    var dt = P.DT, f0 = Math.pow(1 - P.FRICTION, dt);
-    var x = ball.x, y = ball.y, vx = ball.vx, vy = ball.vy;
+  function enemyGoalX(team) {       // Rojo ataca +x, Azul ataca -x
+    return team === 1 ? GOAL_X : -GOAL_X;
+  }
+
+  /* Prediccion fisica: integra posicion += velocidad con friccion 0.99
+     y rebote simple en los muros. Resultado en predX/predY. */
+  function predictBall(ball, steps) {
+    var x = ball.x, y = ball.y;
+    var vx = ball.xspeed, vy = ball.yspeed;
     for (var i = 0; i < steps; i++) {
-      vx *= f0; vy *= f0;
-      var nx = x + vx * dt;
-      var ny = y + vy * dt;
-      if (nx < P.BALL_R || nx > P.W - P.BALL_R) vx = -vx;
-      if (ny < P.BALL_R || ny > P.H - P.BALL_R) vy = -vy;
-      x = V.clamp(nx, P.BALL_R, P.W - P.BALL_R);
-      y = V.clamp(ny, P.BALL_R, P.H - P.BALL_R);
-      if (Math.abs(vx) < 0.001 && Math.abs(vy) < 0.001) break;
+      x += vx; y += vy;
+      if (x > FIELD_W - 8) { x = FIELD_W - 8; vx = -vx; }
+      else if (x < -FIELD_W + 8) { x = -FIELD_W + 8; vx = -vx; }
+      if (y > FIELD_H - 8) { y = FIELD_H - 8; vy = -vy; }
+      else if (y < -FIELD_H + 8) { y = -FIELD_H + 8; vy = -vy; }
+      vx *= CFG.friction; vy *= CFG.friction;
     }
-    return { x: x, y: y };
+    predX = x; predY = y;
   }
 
-  function behindBall(anchor, oppGoal, stick) {
-    var toGoal = V.norm(V.sub(oppGoal, anchor));
-    return V.sub(anchor, V.mul(toGoal, stick));
+  /* ============================================================
+     ENVÍO DE CONTROL (compatible con ambas generaciones de API)
+     ============================================================ */
+  function sendInputs(id, dx, dy, kick, dash) {
+    if (API.power) {
+      room.setPlayerInputs({ dx: dx, dy: dy, kick: !!kick, dash: !!dash }, id);
+    } else if (API.legacyControls) {
+      room[API.legacyControls](id, {
+        up: dy < -0.15,
+        down: dy > 0.15,
+        left: dx < -0.15,
+        right: dx > 0.15,
+        kick: !!kick
+      });
+    } else {
+      console.error('[Neptunzinho] No existe ninguna funcion de control en esta version.');
+    }
   }
 
-  function leadPoint(pred, oppGoal, mePos) {
-    var distMe = V.dist(mePos, pred);
-    var lead = Math.min(65, distMe * 0.25);
-    return behindBall(pred, oppGoal, CFG.stickDist + lead);
+  /* ============================================================
+     GESTIÓN DEL BOT (asignacion, avatar, reconexion de ID)
+     ============================================================ */
+  function bond(player, forceTeam) {
+    bot.playerId = player.id;
+    if (forceTeam) bot.team = forceTeam;
+    else if (player.team !== 0) bot.team = player.team;
+    try { room.setPlayerAvatar(player.id, CFG.botAvatar); } catch (e) {}
+    if (player.team === 0) room.setPlayerTeam(player.id, bot.team);
+    room.sendAnnouncement(CFG.botAvatar + ' Neptunzinho IA conectado en equipo ' + (bot.team === 1 ? 'ROJO' : 'AZUL'));
   }
 
-  function blockPoint(ball, pred, ownGoal) {
-    var ref = ball;
-    var dirToOwn = V.norm(V.sub(ownGoal, ball));
-    var travel = V.sub(pred, ball);
-    var dirVel = V.norm(travel);
-    var usePred = V.dot(dirToOwn, dirVel) > 0.7 && V.len(travel) > 40;
-    if (usePred) ref = pred;
-    var dline = V.norm(V.sub(ref, ownGoal));
-    var toOwn = V.dist(ball, ownGoal);
-    var perp = { x: -dline.y, y: dline.x };
-    var off = 14 * (1 - Math.min(1, toOwn / 350));
-    var pt = V.add(ownGoal, V.mul(dline, CFG.blockDist));
-    return V.add(pt, V.mul(perp, off));
-  }
-
-  function wantKick(me, ball, aim) {
-    var d = V.dist(me.position, ball);
-    if (d > CFG.kickRange) return false;
-    var toBall = V.norm(V.sub(ball, me.position));
-    var toAim = V.norm(V.sub(aim, ball));
-    var farShot = V.dist(me.position, aim) > 300;
-    var th = farShot ? CFG.alignCosFar : CFG.alignCosClose;
-    return V.dot(toBall, toAim) > th;
-  }
-
-  function drive(me, target) {
-    var out = { left: false, right: false, up: false, down: false, kick: false };
-    var dx = target.x - me.position.x;
-    var dy = target.y - me.position.y;
-    var d = Math.hypot(dx, dy);
-    if (d < 3) return out;
-    var nx = dx / d, ny = dy / d;
-    if (nx > 0.18) out.right = true; else if (nx < -0.18) out.left = true;
-    if (ny > 0.18) out.down = true; else if (ny < -0.18) out.up = true;
-    return out;
-  }
-
-  function bouncesIntoGoal(ball, target, opp) {
-    var dt = P.DT, R = P.BALL_R, W = P.W, H = P.H;
-    var dir = V.norm(V.sub(target, ball));
-    var sx = ball.x, sy = ball.y;
-    var vx = dir.x * CFG.ballSpeed, vy = dir.y * CFG.ballSpeed;
-    var isLeft = opp.x < 400;
-    for (var i = 0; i < 180; i++) {
-      var f = Math.pow(1 - P.FRICTION, dt);
-      vx *= f; vy *= f;
-      sx += vx * dt; sy += vy * dt;
-      if (sy > opp.y - CFG.goalHalf && sy < opp.y + CFG.goalHalf) {
-        if (isLeft && sx <= R - 0.1) return true;
-        if (!isLeft && sx >= W - R + 0.1) return true;
-      }
-      if (isLeft && sx <= R) { sx = R; vx = -vx; }
-      if (!isLeft && sx >= W - R) { sx = W - R; vx = -vx; }
-      if (sy <= R) { sy = R; vy = -vy; }
-      else if (sy >= H - R) { sy = H - R; vy = -vy; }
-      if (Math.abs(vx) < 0.01 && Math.abs(vy) < 0.01) return false;
+  // Si el bot se fue, rebusca en la sala a alguien con el nombre reservado
+  function reclaimBot() {
+    var pl = room.getPlayerList();
+    for (var i = 0; i < pl.length; i++) {
+      if (pl[i].name === CFG.botName) { bond(pl[i]); return true; }
     }
     return false;
   }
 
-  function scoreShot(ball, botPos, opp, cand) {
-    var want = V.norm(V.sub(opp, ball));
-    var dirC = V.norm(V.sub(cand, ball));
-    var a1 = V.angleDiff(want, dirC);
-    var a2 = V.angleDiff(V.norm(V.sub(ball, botPos)), dirC);
-    return a1 + a2 + V.dist(ball, cand) * 0.002;
-  }
-
-  function planShot(ball, botPos, opp) {
-    var cands = [
-      { x: opp.x, y: opp.y },
-      { x: opp.x, y: opp.y - CFG.goalHalf * 0.8 },
-      { x: opp.x, y: opp.y + CFG.goalHalf * 0.8 }
-    ];
-    [0, -CFG.goalHalf * 0.8, CFG.goalHalf * 0.8].forEach(function (dy) {
-      var my = opp.y + dy;
-      cands.push({ x: opp.x, y: 2 * P.BALL_R - my });
-      cands.push({ x: opp.x, y: 2 * (P.H - P.BALL_R) - my });
-    });
-    var best = null, bestScore = Infinity;
-    for (var i = 0; i < cands.length; i++) {
-      var c = cands[i];
-      if (!bouncesIntoGoal(ball, c, opp)) continue;
-      var s = scoreShot(ball, botPos, opp, c);
-      if (s < bestScore) { bestScore = s; best = c; }
-    }
-    return best;
-  }
-
-  function pickClearAim(goals, ball) {
-    var side = goals.opp.x < goals.own.x ? -1 : 1;
-    var lane = V.clamp(ball.y, 170, 230);
-    var aim = { x: ball.x + side * 380, y: lane };
-    if (ball.y < 60) aim.y = V.clamp(ball.y + 120, 100, 340);
-    if (ball.y > 340) aim.y = V.clamp(ball.y - 120, 60, 300);
-    return aim;
-  }
-
-  function updateBot() {
-    if (!CFG.botEnabled || bot.playerId === null) return;
-    var players = room.getPlayerList();
-    var me = null;
-    for (var i = 0; i < players.length; i++) {
-      if (players[i].id === bot.playerId && players[i].team !== 0) { me = players[i]; break; }
-    }
-    if (!me) return;
-    var ball = room.getBall();
-    if (!ball) return;
-
-    var goals = goalsInfo(me.team);
-    var distBall = V.dist(me.position, ball);
-    var distOwn = V.dist(ball, goals.own);
-    var steps = Math.max(1, Math.round(CFG.ballLookAhead * 60));
-    var pred = simulateBall(ball, steps);
-
-    var target, aim = { x: goals.opp.x, y: goals.opp.y };
-    var kick = false;
-
-    if (distOwn < V.dist(ball, goals.opp)) {
-      if (distOwn < CFG.dangerClear) {
-        target = pred;
-        aim = pickClearAim(goals, ball);
-        kick = wantKick(me, ball, aim);
-      } else {
-        target = blockPoint(ball, pred, goals.own);
-      }
-    } else {
-      if (distBall > CFG.longDist) target = leadPoint(pred, goals.opp, me.position);
-      else target = behindBall(pred, goals.opp, CFG.stickDist);
-      var shot = planShot(ball, me.position, goals.opp);
-      if (shot) aim = shot;
-      kick = wantKick(me, ball, aim);
-    }
-
-    target.x = V.clamp(target.x, 20, P.W - 20);
-    target.y = V.clamp(target.y, 20, P.H - 20);
-
-    var input = drive(me, target);
-    var now = timeNow();
-    input.kick = kick && now - lastKickAt > CFG.kickCooldown;
-    if (input.kick) lastKickAt = now;
-
-    room.setPlayerInputs(me.id, input);
-  }
-
   function balanceTeams() {
-    var pl = room.getPlayerList();
+    if (!CFG.autoBalance) return;
+    var pl;
+    try { pl = room.getPlayerList(); } catch (e) { return; }
     var r = 0, b = 0;
     for (var i = 0; i < pl.length; i++) {
       if (pl[i].team === 1) r++;
@@ -249,8 +172,12 @@
     }
   }
 
+  /* ============================================================
+     EVENTOS DE SALA
+     ============================================================ */
   room.onPlayerJoin = function (player) {
-    if (bot.playerId === null) bot.playerId = player.id;
+    if (player.name === CFG.botName) { bond(player, CFG.botTeam); }
+    else if (CFG.grabFirst && bot.playerId === null) bond(player);
     if (CFG.allAdmins) {
       try { room.setPlayerAdmin(player.id, true); } catch (e) {}
     }
@@ -259,39 +186,183 @@
 
   room.onPlayerLeave = function (player) {
     if (player.id === bot.playerId) {
-      var pl = room.getPlayerList().filter(function (p) { return p.team !== 0; });
-      bot.playerId = pl.length ? pl[0].id : null;
+      bot.playerId = null;
+      reclaimBot();
     }
     balanceTeams();
   };
 
-  room.onTeamVictory = function (scores) {
-    if (CFG.restartDelay <= 0) return;
-    setTimeout(function () { try { room.stopGame(); } catch (e) {} }, CFG.restartDelay);
+  room.onPlayerTeamChange = function (player) {
+    if (player.id === bot.playerId) bot.team = player.team;
   };
 
-  room.onGameStop = function () {
-    setTimeout(function () {
-      var pl = room.getPlayerList().filter(function (p) { return p.team !== 0; });
-      if (pl.length && CFG.restartGap > 0) {
-        try { room.startGame(); } catch (e) {}
-      }
-    }, CFG.restartGap);
+  room.onPositionsReset = function () { kickLockUntil = tick + CFG.kickLock; };
+  room.onGameStart = function () { kickLockUntil = tick + CFG.kickLock; };
+
+  room.onTeamGoal = function (team) {
+    kickLockUntil = tick + CFG.kickLock;
+    var pl;
+    try { pl = room.getPlayerList(); } catch (e) { return; }
+    var name = '';
+    for (var i = 0; i < pl.length; i++) {
+      if (pl[i].team === team) { name = pl[i].name; break; }
+    }
+    room.sendAnnouncement('GOL de ' + (name ? name : 'Equipo ' + team));
   };
 
   room.onPlayerChat = function (player, message) {
     var m = String(message).trim().toLowerCase();
-    if (m === '!bot') {
-      CFG.botEnabled = !CFG.botEnabled;
-      room.sendAnnouncement(CFG.botEnabled ? 'IA del bot ACTIVADA' : 'IA del bot DESACTIVADA');
+    var isAdmin = !player || player.admin;
+
+    if (m === '!bot') {                       // Reasignar/rebuscar el bot
+      bot.playerId = null;
+      if (!reclaimBot()) room.sendAnnouncement('No hay nadie llamado "' + CFG.botName + '" en la sala.');
+      return false;
     }
-    return true;
+    if (m === '/team rojo' || m === '/team 1' || m === '!rojo') {
+      bot.team = 1;
+      if (bot.playerId !== null) room.setPlayerTeam(bot.playerId, 1);
+      return false;
+    }
+    if (m === '/team azul' || m === '/team 2' || m === '!azul') {
+      bot.team = 2;
+      if (bot.playerId !== null) room.setPlayerTeam(bot.playerId, 2);
+      return false;
+    }
+    if (isAdmin && m.indexOf('/stadium ') === 0) {
+      var sname = String(message).trim().substr(9).trim();
+      if (sname) {
+        try {
+          if (typeof room.setDefaultStadium === 'function') { room.setDefaultStadium(sname); }
+          room.sendAnnouncement('Estadio: ' + sname);
+        } catch (e) { room.sendAnnouncement('No se pudo cambiar el estadio.'); }
+      }
+      return false;
+    }
+    return false;
   };
 
-  room.onGameTick = function () { updateBot(); };
+  if (CFG.stadium && typeof room.setDefaultStadium === 'function') {
+    try { room.setDefaultStadium(CFG.stadium); } catch (e) {}
+  }
 
-  try { room.setDefaultStadium('Classic'); } catch (e) {}
+  /* ============================================================
+     LÓGICA IA (60 FPS)
+     ============================================================ */
+  // Elegir esquina del arco rival preferida: la MAS LEJANA del rival
+  // (asegura orificios abiertos) o tiro cruzado si no hay rival visible.
+  function cornerAim(by, enemy) {
+    var half = (CFG.goalHalf - 45) * 0.95;   // ~128 px, lejos de los postes
+    var top = -half, bottom = half;
+    if (enemy) {
+      return Math.abs(top - enemy.y) > Math.abs(bottom - enemy.y) ? top : bottom;
+    }
+    if (by > 0) return top;                   // balon abajo -> esquina arriba
+    if (by < 0) return bottom;                // balon arriba -> esquina abajo
+    return 0;
+  }
 
-  room.sendAnnouncement('Bot IA cargado. Usa !bot para activar/desactivar.');
-  window.HAXBOT = { room: room, cfg: CFG, bot: bot };
+  function tickUpdate() {
+    tick++;
+    if (!bot.playerId) return;
+
+    var players;
+    try { players = room.getPlayerList(); } catch (e) { return; }
+
+    var me = null, enemy = null;
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i];
+      if (p.team === 0) continue;
+      if (p.id === bot.playerId) me = p;
+      else if (!enemy) enemy = p;
+    }
+    if (!me) return;                          // El bot no esta en un equipo activo
+
+    var ball;
+    try { ball = room.getBallPosition(); } catch (e) { ball = null; }
+    if (!ball) return;
+
+    predictBall(ball, CFG.predSteps);
+    var bx = ball.x, by = ball.y;
+
+    var ownGoalX = -enemyGoalX(bot.team);
+    var attackSide = bot.team === 1 ? 1 : -1;
+    var danger = (Math.abs(bx - ownGoalX) < CFG.dangerDist) && (Math.abs(by) < CFG.goalHalf + 150);
+
+    // Punto de disparo: esquina rival segun posicion del rival/balon
+    var gx = enemyGoalX(bot.team);
+    var gy = cornerAim(by, enemy);
+
+    var targetX, targetY;
+
+    if (danger) {
+      // DEFENSA: punto P_def en la recta porteria propia -> balon.
+      // Pararse en esa linea bloquea tiros y corta pases (despeje automatico).
+      targetX = ownGoalX + (bx - ownGoalX) * 0.42;
+      targetY = by * 0.38;
+    } else if ((bx - ownGoalX) * attackSide < 0) {
+      // CAMPO PROPIO: misma linea, un poco mas atacada.
+      targetX = ownGoalX + (bx - ownGoalX) * 0.48;
+      targetY = by * 0.45;
+    } else {
+      // ATAQUE: correr hacia la posicion FUTURA del balon y colocarse
+      // CFG.stickDist px "detras" de el (apartado del arco) para empujarlo.
+      var dxg = predX - gx, dyg = predY - gy;
+      var lg = len(dxg, dyg) || 1;
+      var distMeBall = len(me.position.x - bx, me.position.y - by);
+      var lead = Math.min(70, distMeBall * CFG.leadScale);
+      targetX = predX + (dxg / lg) * (CFG.stickDist + lead);
+      targetY = predY + (dyg / lg) * (CFG.stickDist + lead);
+    }
+
+    targetX = clamp(targetX, -FIELD_W + MARGIN, FIELD_W - MARGIN);
+    targetY = clamp(targetY, -FIELD_H + MARGIN, FIELD_H - MARGIN);
+
+    // Movimiento: vector normalizado con frenada al acercarse
+    var ddx = targetX - me.position.x, ddy = targetY - me.position.y;
+    var distT = len(ddx, ddy) || 1;
+    var speed = Math.min(1, distT / 55);
+    var dx = (ddx / distT) * speed;
+    var dy = (ddy / distT) * speed;
+
+    // Disparo: alineacion balon -> esquina rival < 0.55 rad y cooldown.
+    // "Rockets" = disparos largos: con el balon lejos seguimos pateando
+    // cuando estamos alineados, sin importar la distancia.
+    var kick = false, dash = false;
+    var dbp = len(bx - me.position.x, by - me.position.y);
+
+    if (dbp < CFG.kickRange + 6 && tick > kickLockUntil) {
+      var aBotToBall = Math.atan2(by - me.position.y, bx - me.position.x);
+      var aBallToGoal = Math.atan2(gy - by, gx - bx);
+      var diff = Math.abs(normAngle(aBotToBall - aBallToGoal));
+      var aligned = diff < CFG.alignRadians;
+
+      // Despeje de emergencia en area propia -> patear casi siempre
+      if (danger && dbp < CFG.kickRange) aligned = true;
+
+      if (aligned && tick >= lastKickTick + CFG.kickCooldown) {
+        kick = true;
+        lastKickTick = tick;
+      }
+    }
+
+    // Sprint (solo API moderna) cuando estamos muy lejos del balon
+    if (API.power && distMeBall > 170) dash = true;
+
+    sendInputs(bot.playerId, dx, dy, kick, dash);
+  }
+
+  room.onGameTick = function () {
+    try {
+      tickUpdate();
+    } catch (e) {                          // Nunca dejar caer el loop del servidor
+      if (!tickError) {
+        tickError = true;
+        console.error('[Neptunzinho] Error en onGameTick:', e);
+      }
+    }
+  };
+
+  room.sendAnnouncement('Bot IA profesional cargado. El jugador "' + CFG.botName + '" sera controlado por la IA.');
+  window.HAXBOT = { room: room, cfg: CFG, bot: bot, api: API };
 })();
