@@ -1,28 +1,50 @@
 'use strict';
 
 /* ============================================================
-   NE PTUNZINHO — Bot IA para Node.js
+   NE PTUNZINHO v2 — Bot IA Profesional 1v1 (node-haxball)
    Libreria: node-haxball  (github.com/wxyz-abcd/node-haxball)
    ------------------------------------------------------------
-   POR QUE ESTO FUNCIONA y la pagina oficial no:
-   node-haxball emula el host completo en Node y expone el control
-   real de input de cada jugador: room.fakeSendPlayerInput().
-   La API oficial (haxball.com/headless) NO trae ese metodo.
+   Basada en 4 capas de decision, re-evaluadas en cada tick:
+
+   1) PORTERO     -> si el balon esta en zona de peligro, el bot
+                     se coloca en la recta gol-balon usando la
+                     trayectoria predicha (donde cruzaria la
+                     linea de gol) + sesgo de esquinas que el
+                     rival convierte habitualmente (aprendido).
+   2) ATAQUE      -> si el bot es el mas cercano al balon, corre
+                     al PRIMER punto de la trayectoria que puede
+                     alcanzar (interceptacion, no persecucion),
+                     y al llegar dribla controlando el balon con
+                     golpecitos hacia la esquina elegida.
+   3) SOMBRA      -> si el rival lleva el balon, se interpone
+                     entre el balon y la porteria propia.
+   4) FORMACION   -> sin partido, ocupa su posicion inicial.
+
+   Control de velocidad con FRENO: el bot mide su velocidad real
+   y frena antes de llegar (evita el "pase de largo" que hacia
+   jugar tan mal a la v1). Movimiento en 8 direcciones digitales
+   (la API no da velocidad proporcional), con deadzone.
+
+   Aprendizaje (heuristico, igual que la v1 pero ampliado):
+   - Esquina preferida para tirar (refuerza la que convierte,
+     decae con el tiempo).
+   - Sesgo de PORTERO: recuerda hacia que esquina del arco te
+     tira/remata el rival y ajusta su posicion de guardameta.
+   - Ajuste de la linea por marcador (perdiendo, defensa mas
+     solida; ganando, presiona mas arriba).
 
    USO:
    1) npm install node-haxball
    2) Obten tu token en https://www.haxball.com/headlesstoken
-      (formato: thr1.AAAA....BBB)
    3) Ponlo en TOKEN o en la variable HAXBALL_TOKEN
-   4) node index.js
-      El link de la sala se imprime en consola (onAfterRoomLink).
+   4) node index.js   -> el link se imprime en consola.
    ============================================================ */
 
 const api = require('node-haxball')();
-const { Utils, Room, RoomConfig, AllowFlags, OperationType } = api;
+const { Utils, Room, RoomConfig, AllowFlags } = api;
 
 /* ============================================================
-   CONFIGURACIÓN (misma base que haxball-bot-ia.js)
+   CONFIGURACIÓN
    ============================================================ */
 const TOKEN = process.env.HAXBALL_TOKEN || 'thr1.AAAAAGqqAveOEyb13c4oqQ.GT0ifiv2I1U';
 
@@ -30,29 +52,34 @@ const CONFIG = {
   roomName: 'Sala Bot Pro | Neptunzinho (1v1)',
   botName: 'Neptunzinho',
   botAvatar: '\u26A1',                 // ⚡
-  botId: 65535,                        // id del bot "en memoria" (usado por node-haxball)
+  botId: 65535,                        // id del bot "en memoria"
   botTeam: 1,                          // 1 = Rojo | 2 = Azul
-  adminKey: 'neptunzinho',             // clave secreta para !admin neptunzinho
-  scoreLimit: 3,                       // goles para ganar (1v1)
-  timeLimit: 0,                        // minutos (0 = sin tiempo)
-  // ---- Física ----
-  friction: 0.99,                      // decaimiento de velocidad del balon por tick
-  predSteps: 30,                       // frames a futuro (~0.5 s)
-  // ---- Disparo ----
-  kickRange: 50,                       // rango maximo de patada
-  kickCooldown: 8,                     // ticks entre patadas (~133 ms)
-  quickCooldown: 4,                    // ticks cerca del arco (finishing)
-  kickLock: 90,                        // no patear en el arranque del kickoff
-  alignRadians: 0.6,                   // tolerancia de alineacion para disparar
-  // ---- Movimiento ----
-  deadzone: 0.18,                      // umbral dx/dy continuo -> teclas digitales
-  stickDist: 22,                       // px "detras" del balon al atacar
-  leadScale: 0.24,                     // anticipacion al punto futuro
-  blockBase: 130,                      // linea de bloqueo defensivo
-  dangerBase: 470,                     // radio de peligro en area propia
+  adminKey: 'neptunzinho',
+  scoreLimit: 3,
+  timeLimit: 0,
+  // ---- Física / predicción ----
+  friction: 0.99,                      // decaimiento de velocidad del balon
+  predSteps: 40,                       // frames a futuro para interceptar
+  maxSpeed: 26,                        // velocidad maxima estimada (px/tick)
+  brakeAcc: 3.2,                       // deceleracion estimada (px/tick^2)
+  reachSpeed: 15,                      // velocidad media de desplazamiento
+  reachEps: 30,                        // margen para "alcanzo el punto"
+  // ---- Disparo / dribling ----
+  kickRange: 50,
+  kickCooldown: 7,                     // ticks entre patadas lejos del arco
+  quickCooldown: 3,                    // ticks entre patadas cerca del arco
+  kickLock: 90,                        // no patear en el arranque/kickoff
+  alignRadians: 0.75,                  // tolerancia de alineacion al tirar
+  dribbleTol: 1.05,                    // tolerancia para golpecito de dribling
+  finishRange: 620,                    // distancia desde la que se "remata"
+  touchRange: 28,                      // rango fisico de toque (radio jug+balon)
+  // ---- Posicionamiento ----
   goalHalf: 180,                       // media altura de la porteria (Classic)
-  avoidDist: 170,                      // rango para esquivar rival
-  finishRange: 420                     // distancia de inicio del modo finisher
+  deadzone: 0.18,
+  avoidDist: 150,                      // rango para esquivar al rival
+  dangerBase: 480,                     // radio de peligro en area propia
+  blockBase: 130,
+  shadowSharp: 0.5                     // agresividad de la linea defensiva
 };
 
 /* ============================================================
@@ -60,7 +87,8 @@ const CONFIG = {
    ============================================================ */
 const FIELD_W = 1880, FIELD_H = 1040;   // medias dimensiones del campo
 const GOAL_X = 1860;                    // linea de gol
-const MARGIN = 30;
+const MARGIN = 34;
+const BALL_R = 10, PLAYER_R = 15;
 
 /* ============================================================
    ESTADO GLOBAL
@@ -70,12 +98,16 @@ const Bot = {
   lastKickTick: -1000,
   kickLockUntil: 0,
   lastSentState: 0,
-  lastBall: null,
   team: CONFIG.botTeam,
+  aimY: 0,
+  // velocidad estimada del bot (derivada de posiciones)
+  pvX: null, pvY: null, Vx: 0, Vy: 0, braking: false,
   learn: {
-    goalsFor: 0,              // goles a favor
-    goalsAgainst: 0,          // goles en contra
-    cornerScore: { up: 0, down: 0 },   // preferencia aprendida por esquina
+    goalsFor: 0,
+    goalsAgainst: 0,
+    cornerScore: { up: 0, down: 0 },   // preferencia de esquina aprendida
+    oppShots: { up: 0, down: 0 },      // esquina preferida del RIVAL (para el portero)
+    saveBias: 0,                       // sesgo vertical del portero (-1 arriba..1 abajo)
     lastShot: { corner: null, tick: -999 },
     decayTick: 0
   }
@@ -89,26 +121,48 @@ function len(x, y) { return Math.sqrt(x * x + y * y); }
 function normAngle(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
 function enemyGoalX(team) { return team === 1 ? GOAL_X : -GOAL_X; }
 
-/* Prediccion fisica: posicion += velocidad con friccion 0.99 por tick
-   y rebote en los muros. Salida en predX/predY (sin objetos por frame). */
-let predX = 0, predY = 0;
-function predictBall(x, y, vx, vy, steps) {
+/* ============================================================
+   PREDICCIÓN FÍSICA: simula el balon tick a tick (friccion,
+   rebotes en muros y parada). Devuelve la LISTA de puntos.
+   ============================================================ */
+function forecastBall(x, y, vx, vy, steps) {
+  const pts = [];
   for (let i = 0; i < steps; i++) {
     x += vx; y += vy;
-    if (x > FIELD_W - 8) { x = FIELD_W - 8; vx = -vx; }
-    else if (x < -FIELD_W + 8) { x = -FIELD_W + 8; vx = -vx; }
-    if (y > FIELD_H - 8) { y = FIELD_H - 8; vy = -vy; }
-    else if (y < -FIELD_H + 8) { y = -FIELD_H + 8; vy = -vy; }
+    if (x > FIELD_W - 8) { x = FIELD_W - 8; vx = -vx * 0.9; }
+    else if (x < -FIELD_W + 8) { x = -FIELD_W + 8; vx = -vx * 0.9; }
+    if (y > FIELD_H - 8) { y = FIELD_H - 8; vy = -vy * 0.9; }
+    else if (y < -FIELD_H + 8) { y = -FIELD_H + 8; vy = -vy * 0.9; }
     vx *= CONFIG.friction; vy *= CONFIG.friction;
+    if (Math.abs(vx) < 0.06 && Math.abs(vy) < 0.06) { vx = 0; vy = 0; }
+    pts.push({ x: x, y: y });
   }
-  predX = x; predY = y;
+  return pts;
+}
+
+/* Primer punto de la trayectoria que el bot PUEDE alcanzar.
+   Con esto el bot "sale al encuentro" del balon en vez de ir detras. */
+function interceptionPoint(meX, meY, pts) {
+  const N = pts.length;
+  for (let t = 1; t < N; t++) {
+    const p = pts[t];
+    const d = len(meX - p.x, meY - p.y);
+    if (d < CONFIG.reachSpeed * t + CONFIG.reachEps) return p;
+  }
+  return pts[N - 1];
+}
+
+/* Y donde el balon CRUZARIA la linea de gol si sigue su trayectoria. */
+function crossingAtGoal(pts, ownGoalX) {
+  const s = ownGoalX > 0 ? 1 : -1;
+  for (const p of pts) {
+    if ((s > 0 && p.x >= ownGoalX - 3) || (s < 0 && p.x <= ownGoalX + 3)) return p.y;
+  }
+  return null;
 }
 
 /* ============================================================
-   LECTURA DEL BALON en node-haxball:
-   room.gameStateExt (extrapolado) -> physicsState.discs[0].
-   El disco trae pos {x,y} y speed {x,y} (px/tick). Si no hay
-   partido, ball.pos es null -> devolvemos null.
+   LECTURA DEL MUNDO (node-haxball, estado extrapolado)
    ============================================================ */
 function readBall(room) {
   const gs = room.gameStateExt || room.gameState;
@@ -122,17 +176,106 @@ function readBall(room) {
     yspeed: b.speed ? b.speed.y : 0
   };
 }
-
-/* ============================================================
-   LECTURA DE UN JUGADOR (disco extrapolado)
-   ============================================================ */
 function playerDisc(player) {
   if (!player || !player.disc) return null;
   return player.disc.ext || player.disc;
 }
+function trackMyMotion(x, y) {
+  const CAP = 34, SMOOTH = 0.45;
+  if (Bot.pvX != null) {
+    const vx = clamp(x - Bot.pvX, -CAP, CAP);
+    const vy = clamp(y - Bot.pvY, -CAP, CAP);
+    Bot.Vx = Bot.Vx * SMOOTH + vx * (1 - SMOOTH);
+    Bot.Vy = Bot.Vy * SMOOTH + vy * (1 - SMOOTH);
+  }
+  Bot.pvX = x; Bot.pvY = y;
+}
 
 /* ============================================================
-   APRENDIZAJE (igual que la version browser)
+   CONTROL DE MOVIMIENTO con FRENO.
+   El jugador de haxball corre siempre a velocidad maxima en
+   8 direcciones; para no sobrepasar el objetivo se frena
+   aplicando input en sentido contrario cuando la distancia de
+   detencion es mayor que la que queda hasta el punto.
+   ============================================================ */
+function moveControl(meX, meY, Vx, Vy, tx, ty) {
+  const dx = tx - meX, dy = ty - meY;
+  const d = Math.sqrt(dx * dx + dy * dy);
+  if (d < 5) { Bot.braking = false; return { dx: 0, dy: 0 }; }
+  const ux = dx / d, uy = dy / d;
+  const spd = Vx * ux + Vy * uy;                       // componente de avance
+  const stopD = (spd * spd) / (2 * CONFIG.brakeAcc) + 10;
+
+  if (Bot.braking) {
+    if (spd < 2.5 || stopD < d - 18) { Bot.braking = false; }
+    else return { dx: -ux, dy: -uy };                  // frenar
+  } else if (spd > 5.5 && stopD > d + 14) {
+    Bot.braking = true;
+    return { dx: -ux, dy: -uy };
+  }
+  return { dx: ux, dy: uy };
+}
+
+function toKeys(dx, dy) {
+  return {
+    dx: dx < -CONFIG.deadzone ? -1 : (dx > CONFIG.deadzone ? 1 : 0),
+    dy: dy < -CONFIG.deadzone ? -1 : (dy > CONFIG.deadzone ? 1 : 0)
+  };
+}
+
+/* ============================================================
+   DECISIONES DE POSICIONAMIENTO
+   ============================================================ */
+function selectAimY(by, enemyY) {
+  const UP = -130, DOWN = 130;
+  const w = Bot.learn.cornerScore;
+  if (enemyY != null) {
+    // esquina MAS lejana del rival, con sesgo de lo aprendido
+    const upS = Math.abs(enemyY - UP) - w.up * 12;
+    const dnS = Math.abs(enemyY - DOWN) - w.down * 12;
+    return upS >= dnS ? UP : DOWN;
+  }
+  return by > 0 ? UP : DOWN;
+}
+
+function keeperTarget(ball, pts, ownGoalX) {
+  const half = CONFIG.goalHalf;
+  const s = ball.x > ownGoalX ? 1 : -1;
+  let cy = null;
+  if (Math.sign(ball.xspeed) === s && Math.abs(ball.xspeed) > 0.4) {
+    cy = crossingAtGoal(pts, ownGoalX);
+  }
+  let baseY = cy != null ? cy : clamp(ball.y, -half, half);
+  baseY = clamp(baseY + Bot.learn.saveBias * 26, -(half - 6), half - 6);
+  let f = 0.30;
+  if (Math.abs(ownGoalX - ball.x) < 260) f = 0.18;     // peligro inminente -> linea
+  const tx = clamp(ownGoalX + (ball.x - ownGoalX) * f, ownGoalX + s * 22, ownGoalX + s * 300);
+  const ty = ball.y * 0.3 + baseY * 0.7;
+  return { x: tx, y: ty };
+}
+
+function shadowTarget(ball, ownGoalX) {
+  const d = Math.abs(ownGoalX - ball.x);
+  let f = clamp(CONFIG.shadowSharp - d / (FIELD_W * 1.7), 0.16, CONFIG.shadowSharp);
+  const s = ball.x > ownGoalX ? 1 : -1;
+  const tx = clamp(ownGoalX + (ball.x - ownGoalX) * f, ownGoalX + s * 110, ownGoalX + s * 520);
+  const ty = clamp(ball.y * 0.75 + Bot.learn.saveBias * 24, -(CONFIG.goalHalf + 90), CONFIG.goalHalf + 90);
+  return { x: tx, y: ty };
+}
+
+function avoidPoint(tx, ty, enemyD) {
+  if (!enemyD || !enemyD.pos) return { x: tx, y: ty };
+  const dx = tx - enemyD.pos.x, dy = ty - enemyD.pos.y;
+  const d = len(dx, dy);
+  if (d > 0 && d < CONFIG.avoidDist) {
+    const ux = dx / d, uy = dy / d;
+    return { x: tx + ux * 55, y: ty + uy * 55 };
+  }
+  return { x: tx, y: ty };
+}
+
+/* ============================================================
+   APRENDIZAJE (heuristico)
    ============================================================ */
 function reinforceCorner() {
   const L = Bot.learn;
@@ -146,43 +289,26 @@ function decayLearning() {
   L.decayTick++;
   if (L.decayTick >= 600) {
     L.decayTick = 0;
-    L.cornerScore.up *= 0.92;
-    L.cornerScore.down *= 0.92;
+    L.cornerScore.up *= 0.9;
+    L.cornerScore.down *= 0.9;
+    L.oppShots.up *= 0.92;
+    L.oppShots.down *= 0.92;
+    L.saveBias = clamp((L.oppShots.up - L.oppShots.down) * 0.22, -1, 1);
   }
-}
-
-/* Esquina mas lejana del rival, con sesgo aprendido */
-function selectAimY(by, enemyY) {
-  const UP = -130, DOWN = 130;
-  if (enemyY != null) {
-    const upS = Math.abs(enemyY - UP) + Bot.learn.cornerScore.up;
-    const dnS = Math.abs(enemyY - DOWN) + Bot.learn.cornerScore.down;
-    return upS >= dnS ? UP : DOWN;
-  }
-  if (by > 0) return UP;
-  if (by < 0) return DOWN;
-  return 0;
 }
 
 /* ============================================================
-   ENVÍO DE INPUT en node-haxball.
-   Utils.keyState(dirX, dirY, kick) devuelve un int 0..31:
-     [kick]*16 + [right]*8 + [left]*4 + [up]*2 + [down]*1
-   room.fakeSendPlayerInput(input, byId) lo aplica al bot.
-   IMPORTANTE (documentado en el repo): si cada tick enviamos el
-   mismo valor, se produce desync; solo enviamos cuando cambia y
-   para repetir kick hay que soltar el bit primero (& -17).
+   ENVÍO DE INPUT (node-haxball). Desync = solo enviar al cambiar.
    ============================================================ */
 function sendInput(room, dirX, dirY, wantKick) {
   let desired = Utils.keyState(dirX, dirY, !!wantKick);
   const me = room.getPlayer(CONFIG.botId);
   const isKicking = !!(me && me.isKicking);
 
-  // Diferir el envio fuera del onGameTick (recomendacion del repo)
   Utils.runAfterGameTick(() => {
     if (desired !== Bot.lastSentState || wantKick !== isKicking) {
       if (desired === Bot.lastSentState && wantKick && !isKicking) {
-        room.fakeSendPlayerInput(desired & -17, CONFIG.botId);   // soltar kick para poder repetir
+        room.fakeSendPlayerInput(desired & -17, CONFIG.botId);   // soltar kick para poder repetirlo
       }
       room.fakeSendPlayerInput(desired, CONFIG.botId);
       Bot.lastSentState = desired;
@@ -193,22 +319,27 @@ function sendInput(room, dirX, dirY, wantKick) {
   });
 }
 
+function kickReady() {
+  return Bot.tick > Bot.kickLockUntil && Bot.tick >= Bot.lastKickTick + CONFIG.kickCooldown;
+}
+
 /* ============================================================
    IA PRINCIPAL (cada game tick)
    ============================================================ */
-function tickUpdate(room) {
-  Bot.tick++;
-  decayLearning();
-
-  // Seguridad: si el bot en memoria se perdio, recrearlo
+function ensureBot(room) {
   if (!room.getPlayer(CONFIG.botId)) {
     try {
       room.fakePlayerJoin(CONFIG.botId, CONFIG.botName, 'us', CONFIG.botAvatar,
         'fake-ip-do-not-believe', 'fake-auth-do-not-believe');
       room.setPlayerTeam(CONFIG.botId, Bot.team);
     } catch (e) {}
-    return;
   }
+}
+
+function tickUpdate(room) {
+  Bot.tick++;
+  decayLearning();
+  ensureBot(room);
 
   room.extrapolate();
 
@@ -216,30 +347,31 @@ function tickUpdate(room) {
   const disc = playerDisc(me);
   if (!disc || !disc.pos) return;
   const meX = disc.pos.x, meY = disc.pos.y;
+  trackMyMotion(meX, meY);
 
   const ball = readBall(room);
+  let wantKick = false;
 
-  // Sin partido en curso: el bot se coloca en formacion (se le ve vivo).
+  /* ---- SIN PARTIDO: formacion ----
+     Mientras el balon no existe (espectadores/kickoff aun sin reset),
+     el bot ocupa su posicion inicial algo adelantada. */
   if (!ball) {
-    const fx = Bot.team === 1 ? -FIELD_W * 0.18 : FIELD_W * 0.18;
-    const fy = -FIELD_H * 0.15;
-    const dx = fx - meX, dy = fy - meY;
-    if (len(dx, dy) > 40) {
-      sendInput(room, dx < -CONFIG.deadzone ? -1 : (dx > CONFIG.deadzone ? 1 : 0),
-                       dy < -CONFIG.deadzone ? -1 : (dy > CONFIG.deadzone ? 1 : 0), false);
-    } else {
-      sendInput(room, 0, 0, false);
-    }
+    const ownGoalX = -enemyGoalX(Bot.team);
+    const gx = enemyGoalX(Bot.team);
+    const fx = ownGoalX + (gx - ownGoalX) * 0.3;
+    const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, fx, 0);
+    const k = toKeys(m.dx, m.dy);
+    sendInput(room, k.dx, k.dy, false);
     return;
   }
 
-  predictBall(ball.x, ball.y, ball.xspeed, ball.yspeed, CONFIG.predSteps);
   const bx = ball.x, by = ball.y;
+  const pts = forecastBall(bx, by, ball.xspeed, ball.yspeed, CONFIG.predSteps);
 
   const ownGoalX = -enemyGoalX(Bot.team);
-  const attackSide = Bot.team === 1 ? 1 : -1;
+  const gx = enemyGoalX(Bot.team);
 
-  // Rival (primer jugador real del otro equipo, si existe)
+  /* ---- Rival (primer jugador real del otro equipo) ---- */
   let enemyD = null;
   const players = room.players || [];
   for (const p of players) {
@@ -249,92 +381,82 @@ function tickUpdate(room) {
       if (enemyD) break;
     }
   }
-  const enemyY = enemyD ? enemyD.pos.y : null;
+  const enemyY = enemyD && enemyD.pos ? enemyD.pos.y : null;
 
-  // Aprendizaje por marcador: perdiendo -> defensa mas honda
-  const drift = clamp((Bot.learn.goalsAgainst - Bot.learn.goalsFor) * 6, -45, 45);
-  const dangerDist = CONFIG.dangerBase + drift * 0.6;
-  const blockDist = clamp(CONFIG.blockBase - drift, 80, 210);
-  const danger = (Math.abs(bx - ownGoalX) < dangerDist) && (Math.abs(by) < CONFIG.goalHalf + 150);
+  const dbp = len(meX - bx, meY - by);                       // dist bot<->balon
+  const ebp = enemyD && enemyD.pos ? len(enemyD.pos.x - bx, enemyD.pos.y - by) : 1e9;
 
-  const gx = enemyGoalX(Bot.team);
   const gy = selectAimY(by, enemyY);
   Bot.aimY = gy;
 
-  let targetX, targetY;
+  /* ---- Linea de peligro ajustada por marcador ---- */
+  const drift = clamp((Bot.learn.goalsAgainst - Bot.learn.goalsFor) * 6, -45, 45);
+  const dangerDist = CONFIG.dangerBase + drift * 0.6;
+  const inDanger = (Math.abs(bx - ownGoalX) < dangerDist) && (Math.abs(by) < CONFIG.goalHalf + 170);
 
-  if (danger) {
-    // DEFENSA: P_def en la recta porteria propia -> balon (bloqueo de tiro)
-    targetX = ownGoalX + (bx - ownGoalX) * 0.42;
-    targetY = by * 0.38;
-  } else if ((bx - ownGoalX) * attackSide < 0) {
-    // CAMPO PROPIO: misma linea, mas adelantada
-    targetX = ownGoalX + (bx - ownGoalX) * 0.48;
-    targetY = by * 0.45;
-  } else {
-    // ATAQUE: interceptar posicion FUTURA del balon y colocarse "detras"
-    const dxg = predX - gx, dyg = predY - gy;
-    const lg = len(dxg, dyg) || 1;
-    const dbp = len(meX - bx, meY - by);
-    const close = Math.abs(bx - gx) < CONFIG.finishRange;
-    const lead = Math.min(70, dbp * CONFIG.leadScale) * (close ? 0.55 : 1);
-    targetX = predX + (dxg / lg) * (CONFIG.stickDist + lead);
-    targetY = predY + (dyg / lg) * (CONFIG.stickDist + lead);
+  /* ================= PORTERO ================= */
+  if (inDanger) {
+    const kp = keeperTarget(ball, pts, ownGoalX);
+    const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, kp.x, kp.y);
+    const k = toKeys(m.dx, m.dy);
+    if (dbp < CONFIG.touchRange && kickReady()) { wantKick = true; Bot.lastKickTick = Bot.tick; }   // despeje
+    sendInput(room, k.dx, k.dy, wantKick);
+    return;
+  }
 
-    // Esquivar al rival cuando disputa el balon (nudge perpendicular)
-    if (enemyD) {
-      const ex = enemyD.pos.x - bx, ey = enemyD.pos.y - by;
-      const ed = len(ex, ey);
-      if (ed > 0 && ed < CONFIG.avoidDist) {
-        const ux = ex / ed, uy = ey / ed;
-        const pxx = -uy, pyy = ux;
-        if (len(enemyD.pos.x - (targetX + pxx * 45), enemyD.pos.y - (targetY + pyy * 45)) >=
-            len(enemyD.pos.x - (targetX - pxx * 45), enemyD.pos.y - (targetY - pyy * 45))) {
-          targetX += pxx * 45; targetY += pyy * 45;
-        } else {
-          targetX -= pxx * 45; targetY -= pyy * 45;
-        }
+  /* ================= SOMBRA (el rival lleva el balon) ================= */
+  if (ebp < dbp - 15) {
+    const sp = shadowTarget(ball, ownGoalX);
+    const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, sp.x, sp.y);
+    const k = toKeys(m.dx, m.dy);
+    if (dbp < CONFIG.touchRange && kickReady()) { wantKick = true; Bot.lastKickTick = Bot.tick; }   // robo/globo
+    sendInput(room, k.dx, k.dy, wantKick);
+    return;
+  }
+
+  /* ================= ATAQUE (yo soy el mas cercano) ================= */
+  const nearBall = dbp < CONFIG.touchRange + 12;
+  let tx, ty;
+  const gdx = gx - bx, gdy = gy - by;
+  const gl = len(gdx, gdy) || 1;
+  const ugx = gdx / gl, ugy = gdy / gl;
+
+  if (nearBall) {
+    /* DRIBLING: colocarse ligeramente "detras" del balon respecto a la
+       esquina elegida y empujarlo con golpecitos. Asi controla y conduce. */
+    tx = bx - ugx * (BALL_R + 10);
+    ty = by - ugy * (BALL_R + 10);
+
+    if (kickReady()) {
+      const aMeB = Math.atan2(by - meY, bx - meX);
+      const aBC = Math.atan2(ugy, ugx);
+      const diff = Math.abs(normAngle(aMeB - aBC));
+      const nearGoal = Math.abs(bx - gx) < CONFIG.finishRange;
+      if (diff < (nearGoal ? CONFIG.alignRadians : CONFIG.dribbleTol)) {
+        wantKick = true;
+        Bot.lastKickTick = Bot.tick;
       }
     }
+  } else {
+    /* PERSEGUIR / INTERCEPTAR: ir al punto mas temprano alcanzable. */
+    const p = interceptionPoint(meX, meY, pts);
+    tx = p.x; ty = p.y;
   }
 
-  targetX = clamp(targetX, -FIELD_W + MARGIN, FIELD_W - MARGIN);
-  targetY = clamp(targetY, -FIELD_H + MARGIN, FIELD_H - MARGIN);
-
-  // Direccion digital (el jugador de haxball se mueve a velocidad
-  // maxima en 8 direcciones, no hay control de velocidad proporcional)
-  const ddx = targetX - meX, ddy = targetY - meY;
-  const distT = len(ddx, ddy);
-  let dirX = 0, dirY = 0;
-  if (distT > 8) {
-    dirX = ddx / distT < -CONFIG.deadzone ? -1 : (ddx / distT > CONFIG.deadzone ? 1 : 0);
-    dirY = ddy / distT < -CONFIG.deadzone ? -1 : (ddy / distT > CONFIG.deadzone ? 1 : 0);
+  if (enemyD) {
+    const av = avoidPoint(tx, ty, enemyD);
+    tx = av.x; ty = av.y;
   }
+  tx = clamp(tx, -FIELD_W + MARGIN, FIELD_W - MARGIN);
+  ty = clamp(ty, -FIELD_H + MARGIN, FIELD_H - MARGIN);
 
-  // Disparo: alineacion balon->esquina < 0.6 rad con cooldown
-  let wantKick = false;
-  const distBP = len(bx - meX, by - meY);
-  if (distBP <= CONFIG.kickRange + 6 && Bot.tick > Bot.kickLockUntil) {
-    const aBotToBall = Math.atan2(by - meY, bx - meX);
-    const aBallToGoal = Math.atan2(gy - by, gx - bx);
-    const diff = Math.abs(normAngle(aBotToBall - aBallToGoal));
-    let aligned = diff < CONFIG.alignRadians;
-    if (danger && distBP <= CONFIG.kickRange) aligned = true;   // despeje
-
-    const nearGoal = Math.abs(bx - gx) < CONFIG.finishRange;
-    const cd = nearGoal ? CONFIG.quickCooldown : CONFIG.kickCooldown;
-
-    if (aligned && Bot.tick >= Bot.lastKickTick + cd) {
-      wantKick = true;
-      Bot.lastKickTick = Bot.tick;
-    }
-  }
-
-  sendInput(room, dirX, dirY, wantKick);
+  const m = moveControl(meX, meY, Bot.Vx, Bot.Vy, tx, ty);
+  const k = toKeys(m.dx, m.dy);
+  sendInput(room, k.dx, k.dy, wantKick);
 }
 
 /* ============================================================
-   ROOM CONFIG (los callbacks del host)
+   HOST / ROOM CONFIG (callbacks)
    ============================================================ */
 let currentRoom = null;
 let logError = false;
@@ -346,44 +468,13 @@ function sendAnnouncement(room, msg, targetId) {
   } catch (e) { console.log('[Announcement]', msg); }
 }
 
-/* Comandos de chat. Se procesan desde onBeforeOperationReceived (asi no son
-   visibles para el resto) y se responden solo al autor con un aviso privado. */
-function handleChatCommand(id, rawMessage) {
-  const room = currentRoom;
-  if (!room) return;
-  const low = String(rawMessage).trim().toLowerCase();
-
-  if (low === '!ia') {
-    sendAnnouncement(room,
-      'IA: ' + Bot.learn.goalsFor + ' a favor, ' + Bot.learn.goalsAgainst +
-      ' en contra | esquinas: arriba=' + Bot.learn.cornerScore.up.toFixed(1) +
-      ' abajo=' + Bot.learn.cornerScore.down.toFixed(1),
-      id);
-  } else if (low === '!admin' || low.indexOf('!admin ') === 0) {
-    const pass = String(rawMessage).slice(7).trim();
-    if (pass === CONFIG.adminKey) {
-      room.setPlayerAdmin(id, true);
-      const pl = room.getPlayer(id);
-      sendAnnouncement(room, 'Sos admin. Bienvenido, ' + (pl ? pl.name : 'jugador'), id);
-    } else {
-      sendAnnouncement(room, 'Clave incorrecta.', id);
-    }
-  } else if (low === '!rojo') {
-    Bot.team = 1; room.setPlayerTeam(CONFIG.botId, 1);
-    sendAnnouncement(room, 'Bot -> equipo ROJO.', id);
-  } else if (low === '!azul') {
-    Bot.team = 2; room.setPlayerTeam(CONFIG.botId, 2);
-    sendAnnouncement(room, 'Bot -> equipo AZUL.', id);
-  }
-}
-
 function NeptunBot(api) {
   Object.setPrototypeOf(this, RoomConfig.prototype);
   RoomConfig.call(this, {
     name: 'Neptunzinho',
-    version: '1.0',
+    version: '2.0',
     author: 'Neptunzinho',
-    description: 'IA profesional 1v1 con aprendizaje (node-haxball)',
+    description: 'IA profesional 1v1 con aprendizaje y prediccion fisica (node-haxball)',
     allowFlags: AllowFlags.CreateRoom
   });
 
@@ -401,8 +492,10 @@ function NeptunBot(api) {
     try {
       if (!playerObj) return;
       if (playerObj.id !== CONFIG.botId && playerObj.team.id === 0) {
-        // El humano va al equipo contrario del bot (1v1).
         that.room.setPlayerTeam(playerObj.id, CONFIG.botTeam === 1 ? 2 : 1);
+      }
+      if (playerObj.id !== CONFIG.botId && !that.room.getScores()) {
+        that.room.startGame();
       }
     } catch (e) {}
   };
@@ -418,8 +511,16 @@ function NeptunBot(api) {
     Bot.kickLockUntil = Bot.tick + CONFIG.kickLock;
     try {
       const tg = teamId && typeof teamId === 'object' ? teamId.team : teamId;
-      if (tg === Bot.team) { Bot.learn.goalsFor++; reinforceCorner(); }
-      else { Bot.learn.goalsAgainst++; }
+      if (tg === Bot.team) {
+        Bot.learn.goalsFor++;
+        reinforceCorner();
+      } else {
+        Bot.learn.goalsAgainst++;
+        try {
+          const b = readBall(that.room);
+          if (b && b.y != null) Bot.learn.oppShots[b.y < 0 ? 'up' : 'down']++;
+        } catch (e) {}
+      }
       sendAnnouncement(that.room,
         'GOL | ' + (tg === Bot.team ? 'NOSOTROS' : 'RIVAL') +
         ' | IA: defensa ' + (Bot.learn.goalsAgainst >= Bot.learn.goalsFor ? 'mas solida' : 'mas ofensiva'));
@@ -438,7 +539,8 @@ function NeptunBot(api) {
         sendAnnouncement(that.room,
           'IA: ' + Bot.learn.goalsFor + ' a favor, ' + Bot.learn.goalsAgainst +
           ' en contra | esquinas: arriba=' + Bot.learn.cornerScore.up.toFixed(1) +
-          ' abajo=' + Bot.learn.cornerScore.down.toFixed(1),
+          ' abajo=' + Bot.learn.cornerScore.down.toFixed(1) +
+          ' | rival tira: ' + (Bot.learn.saveBias < 0 ? 'arriba' : (Bot.learn.saveBias > 0 ? 'abajo' : '?')),
           id);
       } else if (low === '!admin' || low.indexOf('!admin ') === 0) {
         handled = true;
@@ -460,41 +562,37 @@ function NeptunBot(api) {
       }
     } catch (e) {}
 
-    // Devolver false hace que el comando NO se publique en el chat (invisible
-    // para el resto). Los mensajes normales devuelven true y se ven igual.
-    return handled ? false : true;
+    return handled ? false : true;   // los comandos no se publican en el chat
   };
 }
 
 /* ============================================================
-   CREACIÓN DE LA SALA (host headless en Node)
+   CREACIÓN DE LA SALA
    ============================================================ */
 Room.create({
   name: CONFIG.roomName,
   password: null,
   showInRoomList: false,
   maxPlayerCount: 4,
-  noPlayer: true,            // host sin jugador humano -> usamos el bot "en memoria"
+  noPlayer: true,
   token: TOKEN
 }, {
   storage: {
-    player_name: CONFIG.botName,   // nombre que se mostrara para el host
+    player_name: CONFIG.botName,
     avatar: CONFIG.botAvatar,
-    geo: { lat: -34, lon: -64, flag: 'ar' }   // ajusta tu pais si quieres
+    geo: { lat: -34, lon: -64, flag: 'ar' }
   },
   config: new NeptunBot(api),
 
   onOpen(room) {
     try {
-      // Crear el bot "en memoria" (id 65535) y ponerlo en rojo
-      room.fakePlayerJoin(CONFIG.botId, CONFIG.botName, 'us', CONFIG.botAvatar,
-        'fake-ip-do-not-believe', 'fake-auth-do-not-believe');
-      room.setPlayerTeam(CONFIG.botId, CONFIG.botTeam);
+      currentRoom = room;
+      ensureBot(room);
 
       if (typeof room.setScoreLimit === 'function') room.setScoreLimit(CONFIG.scoreLimit);
       if (typeof room.setTimeLimit === 'function') room.setTimeLimit(CONFIG.timeLimit);
 
-      try { // Estadio Classic (disco 0 = balon)
+      try {
         const defs = Utils.getDefaultStadiums();
         if (defs && defs[0] && typeof room.setStadium === 'function') room.setStadium(defs[0]);
       } catch (e) {}
@@ -504,13 +602,11 @@ Room.create({
         console.log('  Sala lista. Entra aqui: ' + link);
         console.log('  El bot "' + CONFIG.botName + '" juega en equipo ' + (Bot.team === 1 ? 'ROJO' : 'AZUL') +
           '. Tu enemigo entra por el link.');
-        console.log('  Chat: !ia (stats), !admin neptunzinho (admin, invisible), !rojo / !azul');
+        console.log('  Chat: !ia (stats/aprendizaje), !admin neptunzinho (admin, invisible), !rojo / !azul');
         console.log('==========================================\n');
       };
 
-      console.log('[Neptunzinho] Creando sala "' + CONFIG.roomName + '" con el bot en memoria...');
-
-      // Arranque del partido (el bot juega solo contra arco vacio o contra el humano)
+      console.log('[Neptunzinho] Creando sala "' + CONFIG.roomName + '" con IA v2...');
       setTimeout(() => { try { room.startGame(); } catch (e) {} }, 2500);
     } catch (e) {
       console.error('[Neptunzinho] Error creando la sala:', e);

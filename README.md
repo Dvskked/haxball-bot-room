@@ -61,23 +61,19 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 - Reconexión: si el bot se va, se reasigna en `onPlayerLeave` y con chequeos periódicos.
 
 ### IA (60 FPS, `onGameTick`)
-- **Predicción física**: lee la velocidad real del balón (vía `getDiscProperties(0)` o por
-  dif. de ticks si la API no la da), integra posición+velocidad con fricción **0.99** y rebotes
-  en los muros → el bot intercepta la trayectoria, no persigue la bola.
+- **Predicción física por trayectoria**: simula el balón tick a tick (fricción **0.99**, rebotes y parada) y en vez de perseguirlo va al **primer punto de la trayectoria que puede alcanzar** (interceptación, no persecución).
+- **Control de velocidad con freno**: mide su velocidad real y frena a tiempo → deja de "pasar de largo" la pelota (el defecto de la v1).
 - **Máquina de estados**:
-  - Defensa: se para sobre la recta portería-propia → balón para bloquear.
-  - Campo propio: misma línea, más adelantado.
-  - Ataque: corre a la posición futura del balón y se coloca "detrás" para empujarlo.
-- **Disparo con cooldown**: patea solo alineado (< 0.6 rad a la esquina elegida);
-  cooldown corto cerca del arco (finishing), despeje automático en área propia, y
-  **sprint/dash** cuando está lejos (APIs modernas).
-- **Esquiva al rival** cuando pelea el balón (nudge perpendicular).
+  - **Portero**: con el balón en zona de peligro se coloca en la recta gol→balón usando el punto donde la trayectoria **cruzaría la línea de gol**, con sesgo vertical aprendido según las esquinas que prefiere el rival.
+  - **Sombra**: si el rival lleva el balón, se interpone entre balón y portería.
+  - **Ataque/dribling**: con el balón, lo conduce con golpecitos hacia la esquina elegida; remata cuando queda alineado cerca del arco.
+  - **Formación**: sin balón en juego ocupa su posición inicial.
+- **Disparo con cooldown**: patea solo alineado (< `alignRadians` a la esquina), cooldown corto cerca del arco, despeje/robo automático en el área, y esquivón al rival en disputa.
 
-### Aprendizaje (de verdad)
-- Aprende **qué esquina del arco le convierte más**: cada gol refuerza la esquina del último
-  tiro (`Learn.cornerScore`) y las preferencias decaen lentamente con el tiempo.
-- Se adapta al marcador: si va **perdiendo** hunde la línea defensiva; si va **ganando**,
-  presiona más arriba (`goalDrift`).
+### Aprendizaje (de verdad, heurístico)
+- Aprende **qué esquina del arco le convierte más**: cada gol refuerza la esquina del último tiro y las preferencias decaen con el tiempo.
+- Aprende **hacia qué esquina tira el rival** y ajusta su posición de portero (`saveBias`).
+- Se adapta al marcador: perdiendo hunde la línea defensiva; ganando presiona más arriba (`goalDrift`).
 
 ---
 
@@ -106,19 +102,26 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 | `scoreLimit` | `3` | Goles para ganar |
 | `timeLimit` | `0` | Minutos de límite (0 = ilimitado) |
 | `friction` | `0.99` | Fricción del balón por tick |
-| `predSteps` | `30` | Frames de predicción (~0.5 s) |
+| `predSteps` | `40` | Frames de predicción para interceptar |
+| `maxSpeed` | `26` | Velocidad máxima estimada (px/tick) |
+| `brakeAcc` | `3.2` | Deceleración estimada (px/tick²) |
+| `reachSpeed` | `15` | Velocidad media para "alcanzo el punto" |
+| `reachEps` | `30` | Margen de alcance de interceptación |
 | `kickRange` | `50` | Rango máximo de patada |
-| `kickCooldown` | `8` | Cooldown de patada (ticks) |
-| `quickCooldown` | `4` | Cooldown cerca del arco (ticks) |
+| `kickCooldown` | `7` | Cooldown de patada (ticks) |
+| `quickCooldown` | `3` | Cooldown cerca del arco (ticks) |
 | `kickLock` | `90` | No patear en el arranque del kickoff |
-| `alignRadians` | `0.6` | Tolerancia de alineación para disparar |
-| `stickDist` | `22` | px "detrás" del balón al atacar |
+| `alignRadians` | `0.75` | Tolerancia de alineación para rematar |
+| `dribbleTol` | `1.05` | Tolerancia del golpecito de conducción |
+| `finishRange` | `620` | Distancia desde la que remata |
+| `touchRange` | `28` | Rango de toque (radio jug+balón) |
+| `stickDist` | `12` | px "detrás" del balón al atacar |
 | `leadScale` | `0.24` | Anticipación al punto futuro |
 | `blockBase` | `130` | Línea de bloqueo defensivo |
-| `dangerBase` | `470` | Radio de peligro en área propia |
+| `dangerBase` | `480` | Radio de peligro en área propia |
 | `goalHalf` | `180` | Media altura de la portería (Classic) |
-| `avoidDist` | `170` | Rango para esquivar rival |
-| `finishRange` | `420` | Distancia de arranque del modo finisher |
+| `avoidDist` | `150` | Rango para esquivar rival |
+| `shadowSharp` | `0.5` | Agresividad de la línea defensiva sombra |
 | `adminKey` | `neptunzinho` | Clave de `!admin <clave>` (invisible en el chat) |
 
 ---
@@ -183,7 +186,7 @@ falta que nadie entre a ocupar su nombre; `65535` es su id.
 
 ### Comandos de chat (dentro de la sala)
 
-- `!ia` — estadísticas de la IA (goles, esquinas aprendidas).
+- `!ia` — estadísticas de la IA (goles, esquinas aprendidas y hacia dónde prefiere tirar el rival).
 - `!admin neptunzinho` — te da admin (clave secreta; la podés cambiar en `CONFIG.adminKey`).
 - `!rojo` / `!azul` — cambiá de lado al bot.
 
