@@ -19,7 +19,7 @@
    ============================================================ */
 
 const api = require('node-haxball')();
-const { Utils, Room, RoomConfig, AllowFlags } = api;
+const { Utils, Room, RoomConfig, AllowFlags, OperationType } = api;
 
 /* ============================================================
    CONFIGURACIÓN (misma base que haxball-bot-ia.js)
@@ -244,7 +244,7 @@ function tickUpdate(room) {
   const players = room.players || [];
   for (const p of players) {
     if (p.id === CONFIG.botId) continue;
-    if (p.team !== 0 && p.team === (Bot.team === 1 ? 2 : 1)) {
+    if (p.team && p.team.id === (Bot.team === 1 ? 2 : 1)) {
       enemyD = playerDisc(p);
       if (enemyD) break;
     }
@@ -336,6 +336,7 @@ function tickUpdate(room) {
 /* ============================================================
    ROOM CONFIG (los callbacks del host)
    ============================================================ */
+let currentRoom = null;
 let logError = false;
 
 function sendAnnouncement(room, msg, targetId) {
@@ -343,6 +344,37 @@ function sendAnnouncement(room, msg, targetId) {
     if (targetId != null) room.sendAnnouncement(msg, 0x00FF00, 'bold', 1, targetId);
     else room.sendAnnouncement(msg, 0x00FF00, 'bold', 1);
   } catch (e) { console.log('[Announcement]', msg); }
+}
+
+/* Comandos de chat. Se procesan desde onBeforeOperationReceived (asi no son
+   visibles para el resto) y se responden solo al autor con un aviso privado. */
+function handleChatCommand(id, rawMessage) {
+  const room = currentRoom;
+  if (!room) return;
+  const low = String(rawMessage).trim().toLowerCase();
+
+  if (low === '!ia') {
+    sendAnnouncement(room,
+      'IA: ' + Bot.learn.goalsFor + ' a favor, ' + Bot.learn.goalsAgainst +
+      ' en contra | esquinas: arriba=' + Bot.learn.cornerScore.up.toFixed(1) +
+      ' abajo=' + Bot.learn.cornerScore.down.toFixed(1),
+      id);
+  } else if (low === '!admin' || low.indexOf('!admin ') === 0) {
+    const pass = String(rawMessage).slice(7).trim();
+    if (pass === CONFIG.adminKey) {
+      room.setPlayerAdmin(id, true);
+      const pl = room.getPlayer(id);
+      sendAnnouncement(room, 'Sos admin. Bienvenido, ' + (pl ? pl.name : 'jugador'), id);
+    } else {
+      sendAnnouncement(room, 'Clave incorrecta.', id);
+    }
+  } else if (low === '!rojo') {
+    Bot.team = 1; room.setPlayerTeam(CONFIG.botId, 1);
+    sendAnnouncement(room, 'Bot -> equipo ROJO.', id);
+  } else if (low === '!azul') {
+    Bot.team = 2; room.setPlayerTeam(CONFIG.botId, 2);
+    sendAnnouncement(room, 'Bot -> equipo AZUL.', id);
+  }
 }
 
 function NeptunBot(api) {
@@ -368,7 +400,7 @@ function NeptunBot(api) {
   this.onPlayerJoin = function (playerObj) {
     try {
       if (!playerObj) return;
-      if (playerObj.id !== CONFIG.botId && playerObj.team === 0) {
+      if (playerObj.id !== CONFIG.botId && playerObj.team.id === 0) {
         // El humano va al equipo contrario del bot (1v1).
         that.room.setPlayerTeam(playerObj.id, CONFIG.botTeam === 1 ? 2 : 1);
       }
@@ -394,9 +426,10 @@ function NeptunBot(api) {
     } catch (e) {}
   };
 
-  this.onPlayerChat = function (playerObj, message) {
+  this.onPlayerChat = function (id, message) {
     let handled = false;
     try {
+      const pl = that.room.getPlayer(id);
       const m = String(message);
       const low = m.trim().toLowerCase();
 
@@ -406,24 +439,24 @@ function NeptunBot(api) {
           'IA: ' + Bot.learn.goalsFor + ' a favor, ' + Bot.learn.goalsAgainst +
           ' en contra | esquinas: arriba=' + Bot.learn.cornerScore.up.toFixed(1) +
           ' abajo=' + Bot.learn.cornerScore.down.toFixed(1),
-          playerObj.id);
+          id);
       } else if (low === '!admin' || low.indexOf('!admin ') === 0) {
         handled = true;
         const pass = m.slice(7).trim();
         if (pass === CONFIG.adminKey) {
-          that.room.setPlayerAdmin(playerObj.id, true);
-          sendAnnouncement(that.room, 'Sos admin. Bienvenido, ' + playerObj.name, playerObj.id);
+          that.room.setPlayerAdmin(id, true);
+          sendAnnouncement(that.room, 'Sos admin. Bienvenido, ' + (pl ? pl.name : 'jugador'), id);
         } else {
-          sendAnnouncement(that.room, 'Clave incorrecta.', playerObj.id);
+          sendAnnouncement(that.room, 'Clave incorrecta.', id);
         }
       } else if (low === '!rojo') {
         handled = true;
         Bot.team = 1; that.room.setPlayerTeam(CONFIG.botId, 1);
-        sendAnnouncement(that.room, 'Bot -> equipo ROJO.', playerObj.id);
+        sendAnnouncement(that.room, 'Bot -> equipo ROJO.', id);
       } else if (low === '!azul') {
         handled = true;
         Bot.team = 2; that.room.setPlayerTeam(CONFIG.botId, 2);
-        sendAnnouncement(that.room, 'Bot -> equipo AZUL.', playerObj.id);
+        sendAnnouncement(that.room, 'Bot -> equipo AZUL.', id);
       }
     } catch (e) {}
 
