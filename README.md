@@ -62,16 +62,21 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 
 ### IA (60 FPS, `onGameTick`)
 - **Predicción física por trayectoria**: simula el balón tick a tick (fricción **0.99**, rebotes y parada) y en vez de perseguirlo va al **primer punto de la trayectoria que puede alcanzar** (interceptación, no persecución).
-- **Control de velocidad con freno**: mide su velocidad real y frena a tiempo → deja de "pasar de largo" la pelota (el defecto de la v1).
+- **Control de velocidad con freno**: mide su velocidad real y frena a tiempo → deja de "pasar de largo" la pelota (el defecto de la v1). **Solo frena cuando aún está lejos (> rango de patada)**: cerca del balón va recto a él sin frenar, para garantizar el CONTACTO y que la patada dispare siempre.
 - **Máquina de estados**:
   - **Portero**: con el balón en zona de peligro se coloca en la recta gol→balón usando el punto donde la trayectoria **cruzaría la línea de gol**, con sesgo vertical aprendido según las esquinas que prefiere el rival.
   - **Sombra**: si el rival lleva el balón, se interpone entre balón y portería.
-  - **Ataque/dribling**: con el balón, lo conduce con golpecitos hacia la esquina elegida; remata cuando queda alineado cerca del arco.
-  - **Formación**: sin balón en juego ocupa su posición inicial.
-- **Disparo con cooldown**: patea solo alineado (< `alignRadians` a la esquina), cooldown corto cerca del arco, despeje/robo automático en el área, y esquivón al rival en disputa.
+  - **Ataque/dribling**: con el balón, elige la jugada según lo aprendido:
+    - **ROCKET** — se alinea DETRÁS del balón en la línea al arco y **sprinta a través de él**: cada contacto lo empuja con la velocidad del bot + impulso físico de la patada (~40 px/frame). Goles por potencia.
+    - **BB KICK** — con el rival encima, golpe corto al lado libre para **regatear al defensor** y salir corriendo por detrás del balón.
+    - **TIRO DIRECTO** — remate ajustado a la esquina/centro del arco que menos cubre el portero (con preferencia aprendida).
+    - **CONDUCCIÓN** — golpecitos cortos (touch de control) hacia el hueco, rompiendo la sombra rival.
+    - **CLEAR** — despeje defensivo fuera del área propia.
+- **Disparo con cooldown**: patea solo alineado (< `alignRadians`/`rocketAlign`), cooldown corto cerca del arco, despeje/robo automático en el área, y esquivón al rival en disputa.
 
 ### Aprendizaje (de verdad, heurístico)
 - Aprende **qué esquina del arco le convierte más**: cada gol refuerza la esquina del último tiro y las preferencias decaen con el tiempo.
+- Aprende **qué técnica le convierte más a ESTE portero**: `rocket` vs `direct` vs `bb` se refuerzan con cada gol y decaen (con exploración para no estancarse).
 - Aprende **hacia qué esquina tira el rival** y ajusta su posición de portero (`saveBias`).
 - Se adapta al marcador: perdiendo hunde la línea defensiva; ganando presiona más arriba (`goalDrift`).
 
@@ -102,26 +107,30 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 | `scoreLimit` | `3` | Goles para ganar |
 | `timeLimit` | `0` | Minutos de límite (0 = ilimitado) |
 | `friction` | `0.99` | Fricción del balón por tick |
-| `predSteps` | `40` | Frames de predicción para interceptar |
+| `predSteps` | `42` | Frames de predicción para interceptar |
 | `maxSpeed` | `26` | Velocidad máxima estimada (px/tick) |
-| `brakeAcc` | `3.2` | Deceleración estimada (px/tick²) |
-| `reachSpeed` | `15` | Velocidad media para "alcanzo el punto" |
-| `reachEps` | `30` | Margen de alcance de interceptación |
-| `kickRange` | `50` | Rango máximo de patada |
-| `kickCooldown` | `7` | Cooldown de patada (ticks) |
+| `brakeAcc` | `12` | Deceleración estimada (px/tick²) |
+| `reachSpeed` | `13` | Velocidad media para "alcanzo el punto" |
+| `reachEps` | `28` | Margen de alcance de interceptación |
+| `kickRange` | `55` | Rango máximo de patada |
+| `kickCooldown` | `8` | Cooldown de patada (ticks) |
 | `quickCooldown` | `3` | Cooldown cerca del arco (ticks) |
-| `kickLock` | `90` | No patear en el arranque del kickoff |
-| `alignRadians` | `0.75` | Tolerancia de alineación para rematar |
-| `dribbleTol` | `1.05` | Tolerancia del golpecito de conducción |
-| `finishRange` | `620` | Distancia desde la que remata |
+| `dribbleCooldown` | `5` | Cooldown del golpecito de conducción (ticks) |
+| `kickLock` | `95` | No patear en el arranque del kickoff |
+| `alignRadians` | `0.62` | Tolerancia de alineación para rematar |
+| `rocketAlign` | `0.48` | Tolerancia de alineación para ROCKET |
+| `dribbleTol` | `1.15` | Tolerancia del golpecito de conducción |
+| `finishRange` | `640` | Distancia desde la que "remata" |
+| `shotRange` | `760` | Distancia para tiro directo |
+| `rocketRange` | `880` | Distancia para intentar ROCKET |
 | `touchRange` | `28` | Rango de toque (radio jug+balón) |
-| `stickDist` | `12` | px "detrás" del balón al atacar |
-| `leadScale` | `0.24` | Anticipación al punto futuro |
+| `dribbleBack` | `10` | px "detrás" del balón al conducir |
+| `stealRange` | `115` | Amenaza de robo del rival (dispara BB) |
 | `blockBase` | `130` | Línea de bloqueo defensivo |
-| `dangerBase` | `480` | Radio de peligro en área propia |
+| `dangerBase` | `470` | Radio de peligro en área propia |
 | `goalHalf` | `180` | Media altura de la portería (Classic) |
-| `avoidDist` | `150` | Rango para esquivar rival |
-| `shadowSharp` | `0.5` | Agresividad de la línea defensiva sombra |
+| `avoidDist` | `130` | Rango para esquivar rival |
+| `shadowSharp` | `0.52` | Agresividad de la línea defensiva sombra |
 | `adminKey` | `neptunzinho` | Clave de `!admin <clave>` (invisible en el chat) |
 
 ---
