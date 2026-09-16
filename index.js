@@ -32,6 +32,7 @@ const CONFIG = {
   botAvatar: '\u26A1',                 // ⚡
   botId: 65535,                        // id del bot "en memoria" (usado por node-haxball)
   botTeam: 1,                          // 1 = Rojo | 2 = Azul
+  adminKey: 'neptunzinho',             // clave secreta para !admin neptunzinho
   scoreLimit: 3,                       // goles para ganar (1v1)
   timeLimit: 0,                        // minutos (0 = sin tiempo)
   // ---- Física ----
@@ -337,9 +338,11 @@ function tickUpdate(room) {
    ============================================================ */
 let logError = false;
 
-function sendAnnouncement(room, msg) {
-  try { room.sendAnnouncement(msg, 0x00FF00, 'bold', 1); }
-  catch (e) { console.log('[Announcement]', msg); }
+function sendAnnouncement(room, msg, targetId) {
+  try {
+    if (targetId != null) room.sendAnnouncement(msg, 0x00FF00, 'bold', 1, targetId);
+    else room.sendAnnouncement(msg, 0x00FF00, 'bold', 1);
+  } catch (e) { console.log('[Announcement]', msg); }
 }
 
 function NeptunBot(api) {
@@ -366,10 +369,8 @@ function NeptunBot(api) {
     try {
       if (!playerObj) return;
       if (playerObj.id !== CONFIG.botId && playerObj.team === 0) {
-        // El humano va al equipo contrario del bot (1v1) y obtiene admin.
+        // El humano va al equipo contrario del bot (1v1).
         that.room.setPlayerTeam(playerObj.id, CONFIG.botTeam === 1 ? 2 : 1);
-        that.room.setPlayerAdmin(playerObj.id, true);
-        sendAnnouncement(that.room, 'Recibiste admin. Bienvenido, ' + playerObj.name);
       }
     } catch (e) {}
   };
@@ -394,18 +395,41 @@ function NeptunBot(api) {
   };
 
   this.onPlayerChat = function (playerObj, message) {
+    let handled = false;
     try {
-      const m = String(message).trim().toLowerCase();
-      if (m === '!ia') {
+      const m = String(message);
+      const low = m.trim().toLowerCase();
+
+      if (low === '!ia') {
+        handled = true;
         sendAnnouncement(that.room,
           'IA: ' + Bot.learn.goalsFor + ' a favor, ' + Bot.learn.goalsAgainst +
           ' en contra | esquinas: arriba=' + Bot.learn.cornerScore.up.toFixed(1) +
-          ' abajo=' + Bot.learn.cornerScore.down.toFixed(1));
+          ' abajo=' + Bot.learn.cornerScore.down.toFixed(1),
+          playerObj.id);
+      } else if (low === '!admin' || low.indexOf('!admin ') === 0) {
+        handled = true;
+        const pass = m.slice(7).trim();
+        if (pass === CONFIG.adminKey) {
+          that.room.setPlayerAdmin(playerObj.id, true);
+          sendAnnouncement(that.room, 'Sos admin. Bienvenido, ' + playerObj.name, playerObj.id);
+        } else {
+          sendAnnouncement(that.room, 'Clave incorrecta.', playerObj.id);
+        }
+      } else if (low === '!rojo') {
+        handled = true;
+        Bot.team = 1; that.room.setPlayerTeam(CONFIG.botId, 1);
+        sendAnnouncement(that.room, 'Bot -> equipo ROJO.', playerObj.id);
+      } else if (low === '!azul') {
+        handled = true;
+        Bot.team = 2; that.room.setPlayerTeam(CONFIG.botId, 2);
+        sendAnnouncement(that.room, 'Bot -> equipo AZUL.', playerObj.id);
       }
-      if (m === '!admin') { that.room.setPlayerAdmin(playerObj.id, true); }
-      if (m === '!rojo') { Bot.team = 1; that.room.setPlayerTeam(CONFIG.botId, 1); }
-      if (m === '!azul') { Bot.team = 2; that.room.setPlayerTeam(CONFIG.botId, 2); }
     } catch (e) {}
+
+    // Devolver false hace que el comando NO se publique en el chat (invisible
+    // para el resto). Los mensajes normales devuelven true y se ven igual.
+    return handled ? false : true;
   };
 }
 
@@ -447,7 +471,7 @@ Room.create({
         console.log('  Sala lista. Entra aqui: ' + link);
         console.log('  El bot "' + CONFIG.botName + '" juega en equipo ' + (Bot.team === 1 ? 'ROJO' : 'AZUL') +
           '. Tu enemigo entra por el link.');
-        console.log('  Chat: !ia (stats), !admin, !rojo / !azul (lado del bot)');
+        console.log('  Chat: !ia (stats), !admin neptunzinho (admin, invisible), !rojo / !azul');
         console.log('==========================================\n');
       };
 

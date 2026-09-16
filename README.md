@@ -119,6 +119,7 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 | `goalHalf` | `180` | Media altura de la portería (Classic) |
 | `avoidDist` | `170` | Rango para esquivar rival |
 | `finishRange` | `420` | Distancia de arranque del modo finisher |
+| `adminKey` | `neptunzinho` | Clave de `!admin <clave>` (invisible en el chat) |
 
 ---
 
@@ -183,12 +184,12 @@ falta que nadie entre a ocupar su nombre; `65535` es su id.
 ### Comandos de chat (dentro de la sala)
 
 - `!ia` — estadísticas de la IA (goles, esquinas aprendidas).
-- `!admin` — te da admin (si no lo recibiste al entrar).
+- `!admin neptunzinho` — te da admin (clave secreta; la podés cambiar en `CONFIG.adminKey`).
 - `!rojo` / `!azul` — cambiá de lado al bot.
 
-> El **primer jugador humano que entra y el que escriba `!admin`** reciben admin
-> automáticamente (`room.setPlayerAdmin`), así podés pausar, expulsar, cambiar el
-> estadio, etc.
+> Ningún comando `!` se publica en el chat: `onPlayerChat` devuelve `false` y
+> node-haxball filtra el mensaje (no lo ven los otros jugadores, así la clave no
+> se delata). Solo te llega a vos un aviso privado con el resultado.
 
 ## Archivos
 
