@@ -122,9 +122,79 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 
 ---
 
+## Modo Node.js (node-haxball) — el bot SÍ se mueve
+
+La página oficial de HaxBall **no** permite controlar el input del bot. Para que el bot
+juegue de verdad (moverse, tirar, defender) se usa **node-haxball** (`wxyz-abcd`), que
+emula el host completo en Node y expone el control real de input de cada jugador
+(`room.fakeSendPlayerInput(Utils.keyState(dirX, dirY, kick), id)`).
+
+### Pasos
+
+1. Instalación (una sola vez):
+
+   ```bash
+   npm install node-haxball
+   ```
+
+2. Obtené tu **token de headless** en <https://www.haxball.com/headlesstoken>
+   (formato `thr1.XXXX....YYYY`).
+
+3. Ponelo en `index.js` (constante `TOKEN`) o exportalo como variable de entorno
+   (recomendado, así no se sube por error al repo):
+
+   ```powershell
+   $env:HAXBALL_TOKEN="thr1.TU.TOKEN"; node index.js
+   ```
+
+4. Ejecutá:
+
+   ```bash
+   node index.js
+   ```
+
+5. La consola imprime el **link de la sala** (`onAfterRoomLink`). Entrá por ahí y
+   quedás automáticamente en el equipo contrario del bot (1v1).
+
+### Arquitectura de `index.js`
+
+| Elemento browser (haxball-bot-ia.js) | Equivalente en node-haxball |
+|---|---|
+| `HBInit({...})` | `Room.create({ name, token, noPlayer, ... }, { config: new NeptunBot(api), storage, onOpen, onClose })` |
+| `room.onGameTick` | `NeptunBot.onGameTick` (subclase de `RoomConfig`) |
+| `room.getBallPosition()` / `getDiscProperties(0)` | `room.gameStateExt.physicsState.discs[0]` (`.pos`, `.speed`) |
+| `player.position` | `player.disc.ext.pos` (tras `room.extrapolate()`) |
+| `room.startGame()` / `setTeam` / `setScoreLimit` | los mismos métodos del host |
+| ❌ no existe (input) | `room.fakeSendPlayerInput(Utils.keyState(dirX, dirY, kick), id)` |
+
+El bot se crea "en memoria" con `room.fakePlayerJoin(65535, ...)` para que no haga
+falta que nadie entre a ocupar su nombre; `65535` es su id.
+
+### Detalles importantes del input
+
+- `Utils.keyState(dirX, dirY, kick)` devuelve un int: `kick*16 + right*8 + left*4 + up*2 + down*1`
+  (`dirX`/`dirY` ∈ {-1, 0, 1}). El jugador se mueve a velocidad máxima en 8 direcciones
+  (no hay control proporcional, por eso la IA convierte el vector a 3x3 con `deadzone`).
+- Solo se envía input cuando cambia (`runAfterGameTick`), y para repetir kick primero
+  se "suelta" el bit con `desired & -17` (patrón oficial del repo, evita desync).
+- Física idéntica a la página: fricción `0.99`/tick, mapa Classic (campo 3760×2080,
+  arco a ±1860). La misma predicción 30 pasos ya funciona.
+
+### Comandos de chat (dentro de la sala)
+
+- `!ia` — estadísticas de la IA (goles, esquinas aprendidas).
+- `!admin` — te da admin (si no lo recibiste al entrar).
+- `!rojo` / `!azul` — cambiá de lado al bot.
+
+> El **primer jugador humano que entra y el que escriba `!admin`** reciben admin
+> automáticamente (`room.setPlayerAdmin`), así podés pausar, expulsar, cambiar el
+> estadio, etc.
+
 ## Archivos
 
-- `haxball-bot-ia.js` — el script completo (IIFE, listo para pegar en consola).
+- `haxball-bot-ia.js` — el script completo para la página (IIFE; el bot NO puede moverse ahí).
+- `index.js` — el bot IA con movimiento real usando node-haxball (la alternativa recomendada).
+- `package.json` / `package-lock.json` — dependencias (`node-haxball`).
 - Este `README.md` — documentación.
 
 ## Solución de problemas
@@ -138,8 +208,10 @@ no permite renombrar jugadores externos, por eso el bot se configura por nombre 
 
 ## Requisitos
 
-- Navegador (Chrome, Firefox, Edge) con acceso a un host headless de HaxBall.
-- Para ver al bot moverse: host con API parcheada (ver tabla).
+- **Para `index.js` (bot con movimiento):** Node.js ≥ 16.9 y un token de
+  <https://www.haxball.com/headlesstoken>.
+- **Para `haxball-bot-ia.js` (página):** navegador (Chrome, Firefox, Edge) con acceso a
+  un host headless de HaxBall; para ver moverse al bot, host con API parcheada (ver tabla).
 
 ## Licencia
 
